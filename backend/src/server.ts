@@ -1,6 +1,8 @@
 import cors from "cors";
 import express from "express";
 import crypto from "node:crypto";
+import { OAuth2Client } from "google-auth-library";
+import { createAuthStore } from "./authStore.js";
 import { assertWhoopConfig, config } from "./config.js";
 import { createTokenStore } from "./tokenStore.js";
 import { WhoopClient } from "./whoopClient.js";
@@ -10,8 +12,10 @@ app.use(cors());
 app.use(express.json());
 
 const oauthStates = new Map<string, number>();
+const authStore = await createAuthStore(config.mongoUri, config.mongoDbName);
 const tokenStore = await createTokenStore(config.mongoUri, config.mongoDbName);
 const whoop = new WhoopClient(tokenStore);
+const googleClient = new OAuth2Client(config.googleWebClientId || undefined);
 
 function newOauthState() {
   return crypto.randomBytes(4).toString("hex");
@@ -23,8 +27,117 @@ function handleError(error: unknown, response: express.Response) {
   response.status(status).json({ error: message });
 }
 
+function bearerToken(request: express.Request) {
+  const authorization = request.header("authorization") ?? "";
+  const [scheme, token] = authorization.split(" ");
+  return scheme?.toLowerCase() === "bearer" ? token : "";
+}
+
 app.get("/health", (_request, response) => {
   response.json({ ok: true });
+});
+
+app.post("/api/auth/google", async (request, response) => {
+  try {
+    if (!config.googleWebClientId) {
+      response.status(500).json({ error: "Missing GOOGLE_WEB_CLIENT_ID." });
+      return;
+    }
+
+    const idToken = String(request.body?.idToken ?? "");
+    if (!idToken) {
+      response.status(400).json({ error: "Missing Google ID token." });
+      return;
+    }
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: config.googleWebClientId
+    });
+    const payload = ticket.getPayload();
+    if (!payload?.sub || !payload.email) {
+      response.status(401).json({ error: "Invalid Google identity." });
+      return;
+    }
+
+    const user = await authStore.upsertUser({
+      provider: "google",
+      providerSubject: payload.sub,
+      email: payload.email,
+      displayName: payload.name ?? payload.email,
+      photoUrl: payload.picture
+    });
+    const session = await authStore.createSession(
+      user.id,
+      config.authSessionDays
+    );
+
+    response.json({ user, session });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/auth/local", async (request, response) => {
+  try {
+    if (!config.allowLocalAuth) {
+      response.status(403).json({ error: "Local auth is disabled." });
+      return;
+    }
+
+    const email = String(request.body?.email ?? "").trim().toLowerCase();
+    const displayName = String(request.body?.displayName ?? "").trim();
+    if (!email || !email.includes("@")) {
+      response.status(400).json({ error: "A valid email is required." });
+      return;
+    }
+
+    const user = await authStore.upsertUser({
+      provider: "local",
+      providerSubject: email,
+      email,
+      displayName: displayName || email,
+      photoUrl: ""
+    });
+    const session = await authStore.createSession(
+      user.id,
+      config.authSessionDays
+    );
+
+    response.json({ user, session });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.get("/api/auth/me", async (request, response) => {
+  try {
+    const token = bearerToken(request);
+    if (!token) {
+      response.status(401).json({ error: "Missing auth token." });
+      return;
+    }
+    const user = await authStore.getUserForSession(token);
+    if (!user) {
+      response.status(401).json({ error: "Invalid or expired session." });
+      return;
+    }
+    response.json({ user });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/auth/logout", async (request, response) => {
+  try {
+    const token = bearerToken(request);
+    if (token) {
+      await authStore.clearSession(token);
+    }
+    response.status(204).send();
+  } catch (error) {
+    handleError(error, response);
+  }
 });
 
 app.get("/api/whoop/connect", (_request, response) => {

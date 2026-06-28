@@ -5,6 +5,7 @@ Sculptus is a Roman-inspired nutrition and training prep diary built with Flutte
 ## Current MVP
 
 - Simple home screen around today's food, workout, and calorie budget
+- App-wide sign-in gate with local development login and Google sign-in scaffold
 - Quick food logging
 - Pasted-food estimator for common real-world logs like fruit, bowls, wings, dumplings, pasta, yogurt, eggs, and explicit calorie notes
 - Restaurant/menu estimate logging with calorie ranges and notes
@@ -19,6 +20,41 @@ Sculptus is a Roman-inspired nutrition and training prep diary built with Flutte
 - Local-first persistence through `shared_preferences`
 
 The local JSON state is organized around the same collections a future sync backend would use: `recipes`, `diary_entries`, `activity_entries`, `step_entries`, `weight_entries`, `competitions`, `goals`, and `whoop`.
+
+## Authentication
+
+Sculptus now starts behind an auth gate. The Flutter app persists a local auth session and only opens the diary after sign-in.
+
+Local development:
+
+- Use the email form on the sign-in screen.
+- If the backend is running, it can create a local session through `POST /api/auth/local`.
+- If the backend is not running, the app falls back to a local-only session so simulator work is not blocked.
+
+Google sign-in:
+
+- The app uses `google_sign_in`.
+- The backend verifies Google ID tokens through `POST /api/auth/google`.
+- Backend sessions are stored in MongoDB when `MONGODB_URI` is set, or in memory when it is blank.
+
+Backend env:
+
+```env
+GOOGLE_WEB_CLIENT_ID=
+SCULPTUS_ALLOW_LOCAL_AUTH=true
+AUTH_SESSION_DAYS=30
+```
+
+Flutter build defines:
+
+```sh
+flutter run \
+  --dart-define=SCULPTUS_API_BASE_URL=http://127.0.0.1:8787 \
+  --dart-define=GOOGLE_WEB_CLIENT_ID=<web-client-id> \
+  --dart-define=GOOGLE_CLIENT_ID=<ios-or-android-client-id-if-needed>
+```
+
+Real Google sign-in still requires platform OAuth setup in Google Cloud/Firebase for iOS and Android. Do not commit client secrets or service config files containing secrets.
 
 ## WHOOP Integration
 

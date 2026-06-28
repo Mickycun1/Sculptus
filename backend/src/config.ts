@@ -5,6 +5,9 @@ export const config = {
   mongoUri: process.env.MONGODB_URI ?? "",
   mongoDbName: process.env.MONGODB_DB ?? "sculptus",
   userKey: process.env.SCULPTUS_USER_KEY ?? "local-user",
+  googleWebClientId: process.env.GOOGLE_WEB_CLIENT_ID ?? "",
+  authSessionDays: Number(process.env.AUTH_SESSION_DAYS ?? 30),
+  allowLocalAuth: process.env.SCULPTUS_ALLOW_LOCAL_AUTH !== "false",
   whoopClientId: process.env.WHOOP_CLIENT_ID ?? "",
   whoopClientSecret: process.env.WHOOP_CLIENT_SECRET ?? "",
   whoopRedirectUri:

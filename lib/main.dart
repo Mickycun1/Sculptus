@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -1005,6 +1006,350 @@ class WhoopApiClient {
   }
 }
 
+class AuthException implements Exception {
+  const AuthException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+class AuthSession {
+  const AuthSession({
+    required this.userId,
+    required this.email,
+    required this.displayName,
+    required this.provider,
+    required this.signedInAt,
+    this.photoUrl = '',
+    this.backendToken = '',
+    this.expiresAt,
+  });
+
+  final String userId;
+  final String email;
+  final String displayName;
+  final String provider;
+  final String photoUrl;
+  final String backendToken;
+  final DateTime signedInAt;
+  final DateTime? expiresAt;
+
+  String get shortName {
+    final trimmed = displayName.trim();
+    if (trimmed.isNotEmpty) {
+      return trimmed;
+    }
+    return email;
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'userId': userId,
+      'email': email,
+      'displayName': displayName,
+      'provider': provider,
+      'photoUrl': photoUrl,
+      'backendToken': backendToken,
+      'signedInAt': signedInAt.toIso8601String(),
+      'expiresAt': expiresAt?.toIso8601String(),
+    };
+  }
+
+  factory AuthSession.fromJson(Map<String, dynamic> json) {
+    return AuthSession(
+      userId: json['userId'] as String? ?? '',
+      email: json['email'] as String? ?? '',
+      displayName: json['displayName'] as String? ?? '',
+      provider: json['provider'] as String? ?? 'local',
+      photoUrl: json['photoUrl'] as String? ?? '',
+      backendToken: json['backendToken'] as String? ?? '',
+      signedInAt:
+          DateTime.tryParse(json['signedInAt'] as String? ?? '') ??
+          DateTime.now(),
+      expiresAt: DateTime.tryParse(json['expiresAt'] as String? ?? ''),
+    );
+  }
+}
+
+class AuthBackendClient {
+  const AuthBackendClient(this.baseUrl);
+
+  final String baseUrl;
+
+  Future<AuthSession> signInWithGoogle(String idToken) async {
+    final json = await _postJson('/api/auth/google', {'idToken': idToken});
+    return _sessionFromResponse(json, 'google');
+  }
+
+  Future<AuthSession> signInWithLocal({
+    required String email,
+    required String displayName,
+  }) async {
+    final json = await _postJson('/api/auth/local', {
+      'email': email,
+      'displayName': displayName,
+    });
+    return _sessionFromResponse(json, 'local');
+  }
+
+  Future<void> logout(String token) async {
+    if (token.trim().isEmpty) {
+      return;
+    }
+    await _postJson('/api/auth/logout', const {}, token: token);
+  }
+
+  Future<Map<String, dynamic>> _postJson(
+    String path,
+    Map<String, dynamic> body, {
+    String token = '',
+  }) async {
+    final trimmed = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    if (trimmed.isEmpty) {
+      throw const AuthException('Set a backend URL first.');
+    }
+
+    final uri = Uri.parse('$trimmed$path');
+    final client = HttpClient();
+    try {
+      final request = await client
+          .postUrl(uri)
+          .timeout(const Duration(seconds: 10));
+      request.headers.contentType = ContentType.json;
+      if (token.trim().isNotEmpty) {
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      }
+      request.write(jsonEncode(body));
+      final response = await request.close().timeout(
+        const Duration(seconds: 15),
+      );
+      final responseBody = await utf8.decodeStream(response);
+
+      if (response.statusCode == 204) {
+        return const {};
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw AuthException(_readAuthError(response.statusCode, responseBody));
+      }
+
+      final decoded = jsonDecode(responseBody);
+      if (decoded is! Map<String, dynamic>) {
+        throw const AuthException('Auth backend returned invalid JSON.');
+      }
+      return decoded;
+    } on SocketException catch (error) {
+      throw AuthException('Cannot reach auth backend: ${error.message}');
+    } on TimeoutException {
+      throw const AuthException('Auth backend did not respond in time.');
+    } on FormatException {
+      throw const AuthException('Auth backend returned invalid JSON.');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  AuthSession _sessionFromResponse(Map<String, dynamic> json, String provider) {
+    final user = Map<String, dynamic>.from(json['user'] as Map? ?? {});
+    final session = Map<String, dynamic>.from(json['session'] as Map? ?? {});
+    final email = user['email'] as String? ?? '';
+    return AuthSession(
+      userId: user['id'] as String? ?? email,
+      email: email,
+      displayName: user['displayName'] as String? ?? email,
+      provider: user['provider'] as String? ?? provider,
+      photoUrl: user['photoUrl'] as String? ?? '',
+      backendToken: session['token'] as String? ?? '',
+      signedInAt:
+          DateTime.tryParse(session['createdAt'] as String? ?? '') ??
+          DateTime.now(),
+      expiresAt: DateTime.tryParse(session['expiresAt'] as String? ?? ''),
+    );
+  }
+
+  String _readAuthError(int statusCode, String body) {
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map && decoded['error'] is String) {
+        return decoded['error'] as String;
+      }
+    } on FormatException {
+      // Fall through to the generic message below.
+    }
+    return 'Auth failed with HTTP $statusCode.';
+  }
+}
+
+class AuthController extends ChangeNotifier {
+  static const _storageKey = 'sculptus_auth_v1';
+  static const _defaultBackendUrl = String.fromEnvironment(
+    'SCULPTUS_API_BASE_URL',
+    defaultValue: 'http://127.0.0.1:8787',
+  );
+  static const _googleClientId = String.fromEnvironment('GOOGLE_CLIENT_ID');
+  static const _googleWebClientId = String.fromEnvironment(
+    'GOOGLE_WEB_CLIENT_ID',
+  );
+
+  bool _isLoaded = false;
+  bool isBusy = false;
+  String errorMessage = '';
+  String authBackendUrl = _defaultBackendUrl;
+  AuthSession? session;
+  Future<void>? _googleInitialization;
+
+  bool get isLoaded => _isLoaded;
+  bool get isSignedIn => session != null;
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    authBackendUrl =
+        prefs.getString('sculptus_auth_backend_url') ?? authBackendUrl;
+    final raw = prefs.getString(_storageKey);
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw) as Map<String, dynamic>;
+        final restored = AuthSession.fromJson(decoded);
+        if (restored.expiresAt == null ||
+            restored.expiresAt!.isAfter(DateTime.now())) {
+          session = restored;
+        }
+      } on FormatException {
+        session = null;
+      } on TypeError {
+        session = null;
+      }
+    }
+    _isLoaded = true;
+    notifyListeners();
+  }
+
+  Future<void> signInWithLocal({
+    required String email,
+    required String displayName,
+  }) async {
+    final normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail.contains('@')) {
+      _setError('Enter a valid email.');
+      return;
+    }
+
+    await _runAuthAction(() async {
+      AuthSession nextSession;
+      try {
+        nextSession = await AuthBackendClient(authBackendUrl).signInWithLocal(
+          email: normalizedEmail,
+          displayName: displayName.trim(),
+        );
+      } on AuthException {
+        nextSession = AuthSession(
+          userId: 'local-$normalizedEmail',
+          email: normalizedEmail,
+          displayName: displayName.trim().isEmpty
+              ? normalizedEmail
+              : displayName.trim(),
+          provider: 'local',
+          signedInAt: DateTime.now(),
+        );
+      }
+      session = nextSession;
+      await _save();
+    });
+  }
+
+  Future<void> signInWithGoogle() async {
+    await _runAuthAction(() async {
+      await _ensureGoogleInitialized();
+      if (!GoogleSignIn.instance.supportsAuthenticate()) {
+        throw const AuthException(
+          'Google sign-in is not available on this platform.',
+        );
+      }
+
+      final account = await GoogleSignIn.instance.authenticate(
+        scopeHint: const ['email', 'profile'],
+      );
+      final idToken = account.authentication.idToken;
+      if (idToken == null || idToken.isEmpty) {
+        throw const AuthException('Google did not return an ID token.');
+      }
+
+      session = await AuthBackendClient(
+        authBackendUrl,
+      ).signInWithGoogle(idToken);
+      await _save();
+    });
+  }
+
+  Future<void> signOut() async {
+    final current = session;
+    session = null;
+    errorMessage = '';
+    notifyListeners();
+    await _save();
+
+    if (current?.provider == 'google') {
+      try {
+        await _ensureGoogleInitialized();
+        await GoogleSignIn.instance.signOut();
+      } on Object {
+        // Local sign-out should not be blocked by provider cleanup.
+      }
+    }
+    if (current?.backendToken.trim().isNotEmpty ?? false) {
+      try {
+        await AuthBackendClient(authBackendUrl).logout(current!.backendToken);
+      } on Object {
+        // The local session has already been cleared.
+      }
+    }
+  }
+
+  Future<void> updateBackendUrl(String value) async {
+    authBackendUrl = value.trim();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('sculptus_auth_backend_url', authBackendUrl);
+    notifyListeners();
+  }
+
+  Future<void> _runAuthAction(Future<void> Function() action) async {
+    isBusy = true;
+    errorMessage = '';
+    notifyListeners();
+    try {
+      await action();
+    } catch (error) {
+      errorMessage = error.toString();
+    } finally {
+      isBusy = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _ensureGoogleInitialized() {
+    _googleInitialization ??= GoogleSignIn.instance.initialize(
+      clientId: _googleClientId.isEmpty ? null : _googleClientId,
+      serverClientId: _googleWebClientId.isEmpty ? null : _googleWebClientId,
+    );
+    return _googleInitialization!;
+  }
+
+  Future<void> _save() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (session == null) {
+      await prefs.remove(_storageKey);
+    } else {
+      await prefs.setString(_storageKey, jsonEncode(session!.toJson()));
+    }
+  }
+
+  void _setError(String message) {
+    errorMessage = message;
+    notifyListeners();
+  }
+}
+
 class Competition {
   const Competition({
     required this.id,
@@ -1658,16 +2003,19 @@ class SculptusApp extends StatefulWidget {
 
 class _SculptusAppState extends State<SculptusApp> {
   final SculptusState state = SculptusState();
+  final AuthController auth = AuthController();
 
   @override
   void initState() {
     super.initState();
     state.load();
+    auth.load();
   }
 
   @override
   void dispose() {
     state.dispose();
+    auth.dispose();
     super.dispose();
   }
 
@@ -1678,11 +2026,15 @@ class _SculptusAppState extends State<SculptusApp> {
       debugShowCheckedModeBanner: false,
       theme: _buildTheme(),
       home: AnimatedBuilder(
-        animation: state,
+        animation: Listenable.merge([state, auth]),
         builder: (context, _) {
-          return state.isLoaded
-              ? HomeShell(state: state)
-              : const LoadingScreen();
+          if (!state.isLoaded || !auth.isLoaded) {
+            return const LoadingScreen();
+          }
+          if (!auth.isSignedIn) {
+            return AuthScreen(auth: auth);
+          }
+          return HomeShell(state: state, auth: auth);
         },
       ),
     );
@@ -1773,10 +2125,168 @@ class LoadingScreen extends StatelessWidget {
   }
 }
 
+class AuthScreen extends StatefulWidget {
+  const AuthScreen({super.key, required this.auth});
+
+  final AuthController auth;
+
+  @override
+  State<AuthScreen> createState() => _AuthScreenState();
+}
+
+class _AuthScreenState extends State<AuthScreen> {
+  final email = TextEditingController();
+  final displayName = TextEditingController();
+
+  @override
+  void dispose() {
+    email.dispose();
+    displayName.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(18),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Panel(
+                padding: 18,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Container(
+                          width: 46,
+                          height: 46,
+                          decoration: BoxDecoration(
+                            color: _romanRed,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(
+                            Icons.account_balance,
+                            color: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Sculptus',
+                            style: Theme.of(context).textTheme.headlineSmall
+                                ?.copyWith(
+                                  color: _ink,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    FilledButton.icon(
+                      onPressed: widget.auth.isBusy
+                          ? null
+                          : widget.auth.signInWithGoogle,
+                      icon: const Icon(Icons.g_mobiledata),
+                      label: const Text('Continue with Google'),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      key: const ValueKey('authEmailField'),
+                      controller: email,
+                      keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
+                      decoration: const InputDecoration(labelText: 'Email'),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: displayName,
+                      textInputAction: TextInputAction.done,
+                      decoration: const InputDecoration(labelText: 'Name'),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        key: const ValueKey('authContinueButton'),
+                        onPressed: widget.auth.isBusy
+                            ? null
+                            : () => widget.auth.signInWithLocal(
+                                email: email.text,
+                                displayName: displayName.text,
+                              ),
+                        icon: const Icon(Icons.login),
+                        label: const Text('Continue'),
+                      ),
+                    ),
+                    if (widget.auth.errorMessage.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        widget.auth.errorMessage,
+                        style: const TextStyle(
+                          color: _romanRed,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 12),
+                    TextButton.icon(
+                      onPressed: widget.auth.isBusy
+                          ? null
+                          : () => _showAuthBackendDialog(context),
+                      icon: const Icon(Icons.settings),
+                      label: const Text('Backend'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showAuthBackendDialog(BuildContext context) async {
+    final controller = TextEditingController(text: widget.auth.authBackendUrl);
+    final nextUrl = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Auth Backend'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.url,
+          decoration: const InputDecoration(labelText: 'Backend URL'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (nextUrl != null) {
+      await widget.auth.updateBackendUrl(nextUrl);
+    }
+  }
+}
+
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key, required this.state});
+  const HomeShell({super.key, required this.state, required this.auth});
 
   final SculptusState state;
+  final AuthController auth;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -1812,6 +2322,23 @@ class _HomeShellState extends State<HomeShell> {
             tooltip: 'Today',
             onPressed: () => widget.state.selectDate(DateTime.now()),
             icon: const Icon(Icons.today),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Account',
+            icon: const Icon(Icons.account_circle),
+            onSelected: (value) {
+              if (value == 'sign_out') {
+                widget.auth.signOut();
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                enabled: false,
+                child: Text(widget.auth.session?.shortName ?? 'Signed in'),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem(value: 'sign_out', child: Text('Sign out')),
+            ],
           ),
         ],
       ),

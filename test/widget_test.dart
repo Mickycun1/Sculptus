@@ -3,12 +3,22 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:sculptus/main.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+Future<void> signInForTest(WidgetTester tester) async {
+  await tester.enterText(
+    find.byKey(const ValueKey('authEmailField')),
+    'mick@example.com',
+  );
+  await tester.tap(find.byKey(const ValueKey('authContinueButton')));
+  await tester.pumpAndSettle();
+}
+
 void main() {
   testWidgets('Sculptus opens to the daily prompts', (tester) async {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
+    await signInForTest(tester);
 
     expect(find.text('Sculptus'), findsOneWidget);
     expect(find.text('Did you workout?'), findsOneWidget);
@@ -49,6 +59,7 @@ one spring roll and one fried dumpling
 
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
+    await signInForTest(tester);
 
     await tester.tap(find.byIcon(Icons.edit_note).last);
     await tester.pumpAndSettle();
@@ -74,6 +85,7 @@ one spring roll and one fried dumpling
 
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
+    await signInForTest(tester);
 
     await tester.tap(find.text('Log').first);
     await tester.pumpAndSettle();
@@ -88,6 +100,7 @@ one spring roll and one fried dumpling
 
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
+    await signInForTest(tester);
 
     await tester.tap(find.text('Log').at(1));
     await tester.pumpAndSettle();
@@ -110,6 +123,7 @@ one spring roll and one fried dumpling
 
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
+    await signInForTest(tester);
 
     await tester.tap(find.text('Weight'));
     await tester.pumpAndSettle();
@@ -155,6 +169,7 @@ one spring roll and one fried dumpling
 
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
+    await signInForTest(tester);
 
     await tester.drag(find.byType(ListView).first, const Offset(0, -500));
     await tester.pumpAndSettle();
