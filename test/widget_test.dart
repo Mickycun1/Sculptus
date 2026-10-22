@@ -104,6 +104,43 @@ void main() {
     expect(state.activityBurnFor(day), 540);
   });
 
+  test('maintenance and deficit come from profile, burn and steps', () async {
+    SharedPreferences.setMockInitialValues({});
+    final state = SculptusState();
+    await state.load();
+    final day = DateTime(2026, 10, 22);
+
+    expect(state.maintenanceFor(day), isNull);
+
+    await state.updateGoals(
+      state.goals.copyWith(age: 33, heightInches: 75, sex: 'male'),
+    );
+    await state.applyLog(
+      LoggedDay.fromJson({
+        'foods': [
+          {
+            'name': 'Mexican bowl with 200g Greek yogurt',
+            'calories': 700,
+            'caloriesLow': 650,
+            'caloriesHigh': 750,
+            'proteinGrams': 55,
+            'assumption': '',
+          },
+        ],
+        'workouts': [
+          {'name': 'CrossFit', 'caloriesBurned': 523, 'minutes': 29},
+        ],
+        'steps': 12000,
+        'weightLb': 202.4,
+      }),
+      day,
+    );
+
+    final maintenance = state.maintenanceFor(day)!;
+    expect(maintenance, 3176);
+    expect(maintenance - state.consumedFor(day).calories, 2476);
+  });
+
   testWidgets('Gauge screen still shows the daily prompts', (tester) async {
     await pumpScreen(tester, (state) => DashboardScreen(state: state));
 

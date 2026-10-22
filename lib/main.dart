@@ -1665,6 +1665,9 @@ class UserGoals {
     required this.targetWeight,
     required this.competitionDate,
     required this.competitionName,
+    this.age = 0,
+    this.heightInches = 0,
+    this.sex = 'male',
   });
 
   final int dailyCalories;
@@ -1674,6 +1677,9 @@ class UserGoals {
   final double targetWeight;
   final DateTime competitionDate;
   final String competitionName;
+  final int age;
+  final double heightInches;
+  final String sex;
 
   int get daysToCompetition {
     return _dateOnly(
@@ -1689,6 +1695,9 @@ class UserGoals {
     double? targetWeight,
     DateTime? competitionDate,
     String? competitionName,
+    int? age,
+    double? heightInches,
+    String? sex,
   }) {
     return UserGoals(
       dailyCalories: dailyCalories ?? this.dailyCalories,
@@ -1698,6 +1707,9 @@ class UserGoals {
       targetWeight: targetWeight ?? this.targetWeight,
       competitionDate: competitionDate ?? this.competitionDate,
       competitionName: competitionName ?? this.competitionName,
+      age: age ?? this.age,
+      heightInches: heightInches ?? this.heightInches,
+      sex: sex ?? this.sex,
     );
   }
 
@@ -1710,6 +1722,9 @@ class UserGoals {
       'targetWeight': targetWeight,
       'competitionDate': _dateKey(competitionDate),
       'competitionName': competitionName,
+      'age': age,
+      'heightInches': heightInches,
+      'sex': sex,
     };
   }
 
@@ -1724,6 +1739,9 @@ class UserGoals {
           DateTime.tryParse(json['competitionDate'] as String? ?? '') ??
           DateTime(DateTime.now().year, 10, 18),
       competitionName: json['competitionName'] as String? ?? 'October Classic',
+      age: (json['age'] as num?)?.round() ?? 0,
+      heightInches: (json['heightInches'] as num?)?.toDouble() ?? 0,
+      sex: json['sex'] as String? ?? 'male',
     );
   }
 
@@ -1932,6 +1950,24 @@ class SculptusState extends ChangeNotifier {
       return upcoming.first;
     }
     return competitions.first;
+  }
+
+  bool get hasProfile => goals.age > 0 && goals.heightInches > 0;
+
+  int? maintenanceFor(DateTime date) {
+    final weight = weightTrendFor(date) ?? latestWeight?.weight;
+    if (!hasProfile || weight == null) {
+      return null;
+    }
+    final kg = weight * 0.45359237;
+    final cm = goals.heightInches * 2.54;
+    final bmr =
+        10 * kg +
+        6.25 * cm -
+        5 * goals.age +
+        (goals.sex == 'female' ? -161 : 5);
+    final walkingBurn = math.max(0, stepsFor(date) - 5000) * 0.045;
+    return (bmr * 1.2 + activityBurnFor(date) + walkingBurn).round();
   }
 
   double? weightTrendFor(DateTime date) {
@@ -2640,6 +2676,10 @@ class _HomeShellState extends State<HomeShell> {
                 value: 'connect_whoop',
                 child: Text('Connect WHOOP'),
               ),
+              const PopupMenuItem(
+                value: 'privacy_policy',
+                child: Text('Privacy policy'),
+              ),
               const PopupMenuItem(value: 'sign_out', child: Text('Sign out')),
               const PopupMenuItem(
                 value: 'delete_account',
@@ -2659,6 +2699,11 @@ class _HomeShellState extends State<HomeShell> {
     switch (value) {
       case 'connect_whoop':
         await _connectWhoop();
+      case 'privacy_policy':
+        await launchUrl(
+          Uri.parse('https://dynafex.ai/sculptus_privacy_policy.html'),
+          mode: LaunchMode.externalApplication,
+        );
       case 'sign_out':
         await widget.auth.signOut();
       case 'delete_account':
@@ -2757,12 +2802,142 @@ class _TodayScreenState extends State<TodayScreen> {
     }
   }
 
+  Future<bool> _ensureAiConsent() async {
+    const consentKey = 'sculptus_ai_consent_v1';
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(consentKey) ?? false) {
+      return true;
+    }
+    if (!mounted) {
+      return false;
+    }
+    final agreed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('How logging works'),
+        content: const Text(
+          'Sculptus sends what you type here to Anthropic\'s Claude AI to '
+          'estimate calories, protein, workouts, steps and weight. Anthropic '
+          'does not use it to train its models. Nothing else from your '
+          'account is sent.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Agree'),
+          ),
+        ],
+      ),
+    );
+    if (agreed != true) {
+      return false;
+    }
+    await prefs.setBool(consentKey, true);
+    return true;
+  }
+
+  Future<void> _editProfile() async {
+    final goals = widget.state.goals;
+    final age = TextEditingController(
+      text: goals.age > 0 ? '${goals.age}' : '',
+    );
+    final feet = TextEditingController(
+      text: goals.heightInches > 0 ? '${goals.heightInches ~/ 12}' : '',
+    );
+    final inches = TextEditingController(
+      text: goals.heightInches > 0
+          ? _formatNumber(goals.heightInches % 12)
+          : '',
+    );
+    var sex = goals.sex;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('About you'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                key: const ValueKey('profileAge'),
+                controller: age,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Age'),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('profileFeet'),
+                      controller: feet,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Feet'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('profileInches'),
+                      controller: inches,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(labelText: 'Inches'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(value: 'male', label: Text('Male')),
+                  ButtonSegment(value: 'female', label: Text('Female')),
+                ],
+                selected: {sex},
+                onSelectionChanged: (value) =>
+                    setDialogState(() => sex = value.first),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (saved == true) {
+      await widget.state.updateGoals(
+        goals.copyWith(
+          age: _readInt(age.text),
+          heightInches: _readInt(feet.text) * 12 + _readDouble(inches.text),
+          sex: sex,
+        ),
+      );
+    }
+    age.dispose();
+    feet.dispose();
+    inches.dispose();
+  }
+
   Future<void> _submit() async {
     final text = logText.text.trim();
     if (text.isEmpty || isLogging) {
       return;
     }
     FocusScope.of(context).unfocus();
+    if (!await _ensureAiConsent()) {
+      return;
+    }
     setState(() {
       isLogging = true;
       errorMessage = '';
@@ -2796,6 +2971,10 @@ class _TodayScreenState extends State<TodayScreen> {
     final eaten = state.consumedFor(today);
     final burned = state.totalBurnFor(today);
     final remaining = state.remainingFoodBudgetFor(today);
+    final maintenance = state.maintenanceFor(today);
+    final balance = maintenance == null
+        ? remaining
+        : maintenance - eaten.calories;
     final foods = state.entriesFor(today);
     final workouts = state.activitiesFor(today);
     final steps = state.stepsFor(today);
@@ -2816,14 +2995,16 @@ class _TodayScreenState extends State<TodayScreen> {
             child: Column(
               children: [
                 Text(
-                  '${remaining.abs()}',
+                  '${balance.abs()}',
                   style: textTheme.displayMedium?.copyWith(
-                    color: remaining >= 0 ? _ink : _romanRed,
+                    color: balance >= 0 ? _ink : _romanRed,
                     fontWeight: FontWeight.w900,
                   ),
                 ),
                 Text(
-                  remaining >= 0 ? 'left to eat' : 'over',
+                  maintenance == null
+                      ? (balance >= 0 ? 'left to eat' : 'over')
+                      : (balance >= 0 ? 'calorie deficit' : 'calorie surplus'),
                   style: const TextStyle(
                     color: _blue,
                     fontWeight: FontWeight.w800,
@@ -2831,8 +3012,11 @@ class _TodayScreenState extends State<TodayScreen> {
                 ),
                 const SizedBox(height: 10),
                 Text(
-                  'eaten ${eaten.calories} · burned $burned'
-                  '${steps > 0 ? ' · $steps steps' : ''}',
+                  maintenance == null
+                      ? 'eaten ${eaten.calories} · burned $burned'
+                            '${steps > 0 ? ' · $steps steps' : ''}'
+                      : 'eaten ${eaten.calories} of ~$maintenance burned'
+                            '${steps > 0 ? ' · $steps steps' : ''}',
                   style: const TextStyle(
                     color: _ink,
                     fontWeight: FontWeight.w700,
@@ -2846,6 +3030,15 @@ class _TodayScreenState extends State<TodayScreen> {
               ],
             ),
           ),
+          if (!state.hasProfile) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              key: const ValueKey('todayProfileButton'),
+              onPressed: _editProfile,
+              icon: const Icon(Icons.person),
+              label: const Text('Add age and height to see your deficit'),
+            ),
+          ],
           const SizedBox(height: 12),
           TodayWeightLine(state: state, today: today),
           const SizedBox(height: 12),
