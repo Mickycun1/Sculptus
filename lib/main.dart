@@ -3,9 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() {
   runApp(const SculptusApp());
@@ -19,6 +22,11 @@ const _olive = Color(0xFF536443);
 const _ink = Color(0xFF25201C);
 const _stone = Color(0xFFD8D0C3);
 const _blue = Color(0xFF2F5869);
+
+const _apiBaseUrl = String.fromEnvironment(
+  'SCULPTUS_API_BASE_URL',
+  defaultValue: 'https://sculptus-backend-oae5ydvgvq-ue.a.run.app',
+);
 
 const _months = <String>[
   'Jan',
@@ -949,9 +957,43 @@ class WhoopSyncException implements Exception {
 }
 
 class WhoopApiClient {
-  const WhoopApiClient(this.baseUrl);
+  const WhoopApiClient(this.baseUrl, {this.token = ''});
 
   final String baseUrl;
+  final String token;
+
+  Future<String> authorizationUrl() async {
+    final trimmed = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final client = HttpClient();
+    try {
+      final request = await client
+          .getUrl(Uri.parse('$trimmed/api/whoop/connect'))
+          .timeout(const Duration(seconds: 10));
+      if (token.isNotEmpty) {
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      }
+      final response = await request.close().timeout(
+        const Duration(seconds: 15),
+      );
+      final body = await utf8.decodeStream(response);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw WhoopSyncException(_readWhoopError(response.statusCode, body));
+      }
+      final decoded = jsonDecode(body);
+      if (decoded is! Map || decoded['authorizationUrl'] is! String) {
+        throw const WhoopSyncException('WHOOP backend returned invalid JSON.');
+      }
+      return decoded['authorizationUrl'] as String;
+    } on SocketException catch (error) {
+      throw WhoopSyncException('Cannot reach WHOOP backend: ${error.message}');
+    } on TimeoutException {
+      throw const WhoopSyncException('WHOOP backend did not respond in time.');
+    } on FormatException {
+      throw const WhoopSyncException('WHOOP backend returned invalid JSON.');
+    } finally {
+      client.close(force: true);
+    }
+  }
 
   Future<WhoopSnapshot> fetchSummary(DateTime date) async {
     final trimmed = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
@@ -968,6 +1010,9 @@ class WhoopApiClient {
       final request = await client
           .getUrl(uri)
           .timeout(const Duration(seconds: 10));
+      if (token.isNotEmpty) {
+        request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
+      }
       final response = await request.close().timeout(
         const Duration(seconds: 15),
       );
@@ -1003,6 +1048,101 @@ class WhoopApiClient {
       // Fall through to the generic message below.
     }
     return 'WHOOP sync failed with HTTP $statusCode.';
+  }
+}
+
+class LoggedFood {
+  const LoggedFood({
+    required this.name,
+    required this.calories,
+    required this.caloriesLow,
+    required this.caloriesHigh,
+    required this.proteinGrams,
+    required this.assumption,
+  });
+
+  final String name;
+  final int calories;
+  final int caloriesLow;
+  final int caloriesHigh;
+  final double proteinGrams;
+  final String assumption;
+
+  factory LoggedFood.fromJson(Map<String, dynamic> json) {
+    return LoggedFood(
+      name: json['name'] as String? ?? 'Food',
+      calories: (json['calories'] as num?)?.round() ?? 0,
+      caloriesLow: (json['caloriesLow'] as num?)?.round() ?? 0,
+      caloriesHigh: (json['caloriesHigh'] as num?)?.round() ?? 0,
+      proteinGrams: (json['proteinGrams'] as num?)?.toDouble() ?? 0,
+      assumption: json['assumption'] as String? ?? '',
+    );
+  }
+}
+
+class LoggedWorkout {
+  const LoggedWorkout({
+    required this.name,
+    required this.caloriesBurned,
+    required this.minutes,
+  });
+
+  final String name;
+  final int caloriesBurned;
+  final int minutes;
+
+  factory LoggedWorkout.fromJson(Map<String, dynamic> json) {
+    return LoggedWorkout(
+      name: json['name'] as String? ?? 'Workout',
+      caloriesBurned: (json['caloriesBurned'] as num?)?.round() ?? 0,
+      minutes: (json['minutes'] as num?)?.round() ?? 0,
+    );
+  }
+}
+
+class LoggedDay {
+  const LoggedDay({
+    this.foods = const [],
+    this.workouts = const [],
+    this.steps,
+    this.weightLb,
+    this.question,
+  });
+
+  final List<LoggedFood> foods;
+  final List<LoggedWorkout> workouts;
+  final int? steps;
+  final double? weightLb;
+  final String? question;
+
+  factory LoggedDay.fromJson(Map<String, dynamic> json) {
+    return LoggedDay(
+      foods: (json['foods'] as List? ?? const [])
+          .map((item) => LoggedFood.fromJson(Map<String, dynamic>.from(item)))
+          .toList(),
+      workouts: (json['workouts'] as List? ?? const [])
+          .map(
+            (item) => LoggedWorkout.fromJson(Map<String, dynamic>.from(item)),
+          )
+          .toList(),
+      steps: (json['steps'] as num?)?.round(),
+      weightLb: (json['weightLb'] as num?)?.toDouble(),
+      question: json['question'] as String?,
+    );
+  }
+}
+
+class LogApiClient {
+  const LogApiClient(this.baseUrl, this.token);
+
+  final String baseUrl;
+  final String token;
+
+  Future<LoggedDay> parse(String text) async {
+    final json = await AuthBackendClient(
+      baseUrl,
+    ).sendJson('POST', '/api/log', {'text': text}, token: token);
+    return LoggedDay.fromJson(json);
   }
 }
 
@@ -1083,6 +1223,23 @@ class AuthBackendClient {
     return _sessionFromResponse(json, 'google');
   }
 
+  Future<AuthSession> signInWithApple({
+    required String identityToken,
+    required String email,
+    required String displayName,
+  }) async {
+    final json = await _postJson('/api/auth/apple', {
+      'identityToken': identityToken,
+      'email': email,
+      'displayName': displayName,
+    });
+    return _sessionFromResponse(json, 'apple');
+  }
+
+  Future<void> deleteAccount(String token) async {
+    await sendJson('DELETE', '/api/account', const {}, token: token);
+  }
+
   Future<AuthSession> signInWithLocal({
     required String email,
     required String displayName,
@@ -1105,6 +1262,15 @@ class AuthBackendClient {
     String path,
     Map<String, dynamic> body, {
     String token = '',
+  }) {
+    return sendJson('POST', path, body, token: token);
+  }
+
+  Future<Map<String, dynamic>> sendJson(
+    String method,
+    String path,
+    Map<String, dynamic> body, {
+    String token = '',
   }) async {
     final trimmed = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
     if (trimmed.isEmpty) {
@@ -1115,7 +1281,7 @@ class AuthBackendClient {
     final client = HttpClient();
     try {
       final request = await client
-          .postUrl(uri)
+          .openUrl(method, uri)
           .timeout(const Duration(seconds: 10));
       request.headers.contentType = ContentType.json;
       if (token.trim().isNotEmpty) {
@@ -1123,7 +1289,7 @@ class AuthBackendClient {
       }
       request.write(jsonEncode(body));
       final response = await request.close().timeout(
-        const Duration(seconds: 15),
+        const Duration(seconds: 90),
       );
       final responseBody = await utf8.decodeStream(response);
 
@@ -1183,10 +1349,7 @@ class AuthBackendClient {
 
 class AuthController extends ChangeNotifier {
   static const _storageKey = 'sculptus_auth_v1';
-  static const _defaultBackendUrl = String.fromEnvironment(
-    'SCULPTUS_API_BASE_URL',
-    defaultValue: 'http://127.0.0.1:8787',
-  );
+  static const _defaultBackendUrl = _apiBaseUrl;
   static const _googleClientId = String.fromEnvironment('GOOGLE_CLIENT_ID');
   static const _googleWebClientId = String.fromEnvironment(
     'GOOGLE_WEB_CLIENT_ID',
@@ -1201,6 +1364,57 @@ class AuthController extends ChangeNotifier {
 
   bool get isLoaded => _isLoaded;
   bool get isSignedIn => session != null;
+  bool get showGoogleSignIn => _googleWebClientId.isNotEmpty;
+  bool get showLocalSignIn => kDebugMode;
+
+  Future<void> signInWithApple() async {
+    await _runAuthAction(() async {
+      final AuthorizationCredentialAppleID credential;
+      try {
+        credential = await SignInWithApple.getAppleIDCredential(
+          scopes: const [
+            AppleIDAuthorizationScopes.email,
+            AppleIDAuthorizationScopes.fullName,
+          ],
+        );
+      } on SignInWithAppleAuthorizationException catch (error) {
+        if (error.code == AuthorizationErrorCode.canceled) {
+          return;
+        }
+        rethrow;
+      }
+      final identityToken = credential.identityToken;
+      if (identityToken == null || identityToken.isEmpty) {
+        throw const AuthException('Apple did not return an identity token.');
+      }
+      final displayName = [
+        credential.givenName ?? '',
+        credential.familyName ?? '',
+      ].where((part) => part.trim().isNotEmpty).join(' ');
+
+      session = await AuthBackendClient(authBackendUrl).signInWithApple(
+        identityToken: identityToken,
+        email: credential.email ?? '',
+        displayName: displayName,
+      );
+      await _save();
+    });
+  }
+
+  Future<bool> deleteAccount() async {
+    final token = session?.backendToken ?? '';
+    var deleted = false;
+    await _runAuthAction(() async {
+      if (token.isNotEmpty) {
+        await AuthBackendClient(authBackendUrl).deleteAccount(token);
+      }
+      deleted = true;
+    });
+    if (deleted) {
+      await signOut();
+    }
+    return deleted;
+  }
 
   Future<void> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -1538,7 +1752,7 @@ class SculptusState extends ChangeNotifier {
   DateTime selectedDate = _dateOnly(DateTime.now());
   UserGoals goals = UserGoals.initial();
   WhoopSnapshot whoop = WhoopSnapshot.empty;
-  String whoopBackendUrl = 'http://127.0.0.1:8787';
+  String whoopBackendUrl = _apiBaseUrl;
   final List<Recipe> recipes = [];
   final List<DiaryEntry> entries = [];
   final List<WeightEntry> weights = [];
@@ -1720,6 +1934,107 @@ class SculptusState extends ChangeNotifier {
     return competitions.first;
   }
 
+  double? weightTrendFor(DateTime date) {
+    final end = _dateOnly(date);
+    final start = end.subtract(const Duration(days: 6));
+    final recent = weights.where((entry) {
+      final day = _dateOnly(entry.date);
+      return !day.isBefore(start) && !day.isAfter(end);
+    }).toList();
+    if (recent.isEmpty) {
+      return null;
+    }
+    return recent.fold<double>(0, (sum, entry) => sum + entry.weight) /
+        recent.length;
+  }
+
+  Future<void> applyLog(LoggedDay log, DateTime date) async {
+    final day = _dateOnly(date);
+    final key = _dateKey(day);
+    final now = DateTime.now();
+
+    for (final food in log.foods) {
+      final range = food.caloriesLow > 0 && food.caloriesHigh > 0
+          ? '${food.caloriesLow}-${food.caloriesHigh} kcal'
+          : '';
+      entries.add(
+        DiaryEntry(
+          id: _newId('entry'),
+          date: day,
+          name: food.name,
+          nutrition: Nutrition(
+            calories: food.calories,
+            protein: food.proteinGrams,
+          ),
+          source: DiarySource.estimate,
+          createdAt: now,
+          notes: [
+            range,
+            food.assumption,
+          ].where((part) => part.trim().isNotEmpty).join(' · '),
+        ),
+      );
+    }
+
+    final hasWhoopWorkout = activities.any((entry) => entry.id == 'whoop-$key');
+    if (!hasWhoopWorkout) {
+      for (final workout in log.workouts) {
+        if (workout.caloriesBurned <= 0) {
+          continue;
+        }
+        activities.add(
+          ActivityEntry(
+            id: _newId('log-workout-$key'),
+            date: day,
+            name: workout.name,
+            caloriesBurned: workout.caloriesBurned,
+            minutes: workout.minutes,
+            createdAt: now,
+          ),
+        );
+      }
+    }
+
+    final steps = log.steps;
+    if (steps != null && steps > 0) {
+      stepEntries.add(
+        StepEntry(
+          id: _newId('log-steps'),
+          date: day,
+          steps: steps,
+          projectedSteps: steps,
+          recordedAt: now,
+          timeLabel: _displayTime(now),
+        ),
+      );
+    }
+
+    final weight = log.weightLb;
+    if (weight != null && weight > 0) {
+      weights.removeWhere((item) => _dateKey(item.date) == key);
+      weights.add(WeightEntry(id: _newId('weight'), date: day, weight: weight));
+    }
+
+    _sortAll();
+    notifyListeners();
+    await _save();
+  }
+
+  Future<void> clearAll() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_storageKey);
+    recipes.clear();
+    entries.clear();
+    weights.clear();
+    activities.clear();
+    stepEntries.clear();
+    competitions.clear();
+    goals = UserGoals.initial();
+    whoop = WhoopSnapshot.empty;
+    competitions.add(_competitionFromGoals());
+    notifyListeners();
+  }
+
   WeightEntry? get latestWeight {
     if (weights.isEmpty) {
       return null;
@@ -1847,6 +2162,10 @@ class SculptusState extends ChangeNotifier {
           createdAt: DateTime.now(),
         ),
       );
+      final typedWorkoutPrefix = 'log-workout-${_dateKey(summaryDate)}';
+      activities.removeWhere(
+        (entry) => entry.id.startsWith(typedWorkoutPrefix),
+      );
     }
 
     final whoopStepId = 'whoop-steps-${_dateKey(summaryDate)}';
@@ -1933,7 +2252,6 @@ class SculptusState extends ChangeNotifier {
   }
 
   void _seed() {
-    final today = _dateOnly(DateTime.now());
     goals = UserGoals.initial();
     recipes
       ..clear()
@@ -1968,23 +2286,8 @@ class SculptusState extends ChangeNotifier {
           ],
         ),
       );
-    entries
-      ..clear()
-      ..add(
-        DiaryEntry(
-          id: _newId('entry'),
-          date: today,
-          name: 'Legion Chicken Rice',
-          source: DiarySource.recipe,
-          recipeId: recipes.first.id,
-          servings: 1,
-          nutrition: recipes.first.perServing,
-          createdAt: DateTime.now(),
-        ),
-      );
-    weights
-      ..clear()
-      ..add(WeightEntry(id: _newId('weight'), date: today, weight: 192));
+    entries.clear();
+    weights.clear();
     whoop = WhoopSnapshot.empty;
     activities.clear();
     stepEntries.clear();
@@ -2188,42 +2491,55 @@ class _AuthScreenState extends State<AuthScreen> {
                       ],
                     ),
                     const SizedBox(height: 18),
-                    FilledButton.icon(
-                      onPressed: widget.auth.isBusy
-                          ? null
-                          : widget.auth.signInWithGoogle,
-                      icon: const Icon(Icons.g_mobiledata),
-                      label: const Text('Continue with Google'),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      key: const ValueKey('authEmailField'),
-                      controller: email,
-                      keyboardType: TextInputType.emailAddress,
-                      textInputAction: TextInputAction.next,
-                      decoration: const InputDecoration(labelText: 'Email'),
-                    ),
-                    const SizedBox(height: 10),
-                    TextField(
-                      controller: displayName,
-                      textInputAction: TextInputAction.done,
-                      decoration: const InputDecoration(labelText: 'Name'),
-                    ),
-                    const SizedBox(height: 12),
                     SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        key: const ValueKey('authContinueButton'),
+                      height: 48,
+                      child: SignInWithAppleButton(
                         onPressed: widget.auth.isBusy
-                            ? null
-                            : () => widget.auth.signInWithLocal(
-                                email: email.text,
-                                displayName: displayName.text,
-                              ),
-                        icon: const Icon(Icons.login),
-                        label: const Text('Continue'),
+                            ? () {}
+                            : widget.auth.signInWithApple,
                       ),
                     ),
+                    if (widget.auth.showGoogleSignIn) ...[
+                      const SizedBox(height: 10),
+                      FilledButton.icon(
+                        onPressed: widget.auth.isBusy
+                            ? null
+                            : widget.auth.signInWithGoogle,
+                        icon: const Icon(Icons.g_mobiledata),
+                        label: const Text('Continue with Google'),
+                      ),
+                    ],
+                    if (widget.auth.showLocalSignIn) ...[
+                      const SizedBox(height: 16),
+                      TextField(
+                        key: const ValueKey('authEmailField'),
+                        controller: email,
+                        keyboardType: TextInputType.emailAddress,
+                        textInputAction: TextInputAction.next,
+                        decoration: const InputDecoration(labelText: 'Email'),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: displayName,
+                        textInputAction: TextInputAction.done,
+                        decoration: const InputDecoration(labelText: 'Name'),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          key: const ValueKey('authContinueButton'),
+                          onPressed: widget.auth.isBusy
+                              ? null
+                              : () => widget.auth.signInWithLocal(
+                                  email: email.text,
+                                  displayName: displayName.text,
+                                ),
+                          icon: const Icon(Icons.login),
+                          label: const Text('Continue'),
+                        ),
+                      ),
+                    ],
                     if (widget.auth.errorMessage.isNotEmpty) ...[
                       const SizedBox(height: 12),
                       Text(
@@ -2234,14 +2550,16 @@ class _AuthScreenState extends State<AuthScreen> {
                         ),
                       ),
                     ],
-                    const SizedBox(height: 12),
-                    TextButton.icon(
-                      onPressed: widget.auth.isBusy
-                          ? null
-                          : () => _showAuthBackendDialog(context),
-                      icon: const Icon(Icons.settings),
-                      label: const Text('Backend'),
-                    ),
+                    if (widget.auth.showLocalSignIn) ...[
+                      const SizedBox(height: 12),
+                      TextButton.icon(
+                        onPressed: widget.auth.isBusy
+                            ? null
+                            : () => _showAuthBackendDialog(context),
+                        icon: const Icon(Icons.settings),
+                        label: const Text('Backend'),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -2293,18 +2611,8 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  int selectedIndex = 0;
-
   @override
   Widget build(BuildContext context) {
-    final screens = [
-      DashboardScreen(state: widget.state),
-      DiaryScreen(state: widget.state),
-      RecipesScreen(state: widget.state),
-      WeightScreen(state: widget.state),
-      GoalsScreen(state: widget.state),
-    ];
-
     return Scaffold(
       appBar: AppBar(
         title: const Row(
@@ -2318,64 +2626,346 @@ class _HomeShellState extends State<HomeShell> {
           ],
         ),
         actions: [
-          IconButton(
-            tooltip: 'Today',
-            onPressed: () => widget.state.selectDate(DateTime.now()),
-            icon: const Icon(Icons.today),
-          ),
           PopupMenuButton<String>(
             tooltip: 'Account',
             icon: const Icon(Icons.account_circle),
-            onSelected: (value) {
-              if (value == 'sign_out') {
-                widget.auth.signOut();
-              }
-            },
+            onSelected: _onMenuSelected,
             itemBuilder: (context) => [
               PopupMenuItem(
                 enabled: false,
                 child: Text(widget.auth.session?.shortName ?? 'Signed in'),
               ),
               const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: 'connect_whoop',
+                child: Text('Connect WHOOP'),
+              ),
               const PopupMenuItem(value: 'sign_out', child: Text('Sign out')),
+              const PopupMenuItem(
+                value: 'delete_account',
+                child: Text('Delete account'),
+              ),
             ],
           ),
         ],
       ),
-      body: SafeArea(child: screens[selectedIndex]),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: selectedIndex,
-        onDestinationSelected: (index) {
-          setState(() {
-            selectedIndex = index;
-          });
-        },
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.speed),
-            selectedIcon: Icon(Icons.speed),
-            label: 'Gauge',
+      body: SafeArea(
+        child: TodayScreen(state: widget.state, auth: widget.auth),
+      ),
+    );
+  }
+
+  Future<void> _onMenuSelected(String value) async {
+    switch (value) {
+      case 'connect_whoop':
+        await _connectWhoop();
+      case 'sign_out':
+        await widget.auth.signOut();
+      case 'delete_account':
+        await _confirmDeleteAccount();
+    }
+  }
+
+  Future<void> _connectWhoop() async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final url = await WhoopApiClient(
+        widget.state.whoopBackendUrl,
+        token: widget.auth.session?.backendToken ?? '',
+      ).authorizationUrl();
+      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+    } catch (error) {
+      messenger.showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
+  Future<void> _confirmDeleteAccount() async {
+    final messenger = ScaffoldMessenger.of(context);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete account?'),
+        content: const Text(
+          'This permanently deletes your Sculptus account, disconnects WHOOP, '
+          'and erases everything logged on this phone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.edit_note),
-            selectedIcon: Icon(Icons.edit_note),
-            label: 'Diary',
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete'),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.menu_book),
-            selectedIcon: Icon(Icons.menu_book),
-            label: 'Recipes',
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    if (await widget.auth.deleteAccount()) {
+      await widget.state.clearAll();
+    } else {
+      messenger.showSnackBar(SnackBar(content: Text(widget.auth.errorMessage)));
+    }
+  }
+}
+
+class TodayScreen extends StatefulWidget {
+  const TodayScreen({super.key, required this.state, required this.auth});
+
+  final SculptusState state;
+  final AuthController auth;
+
+  @override
+  State<TodayScreen> createState() => _TodayScreenState();
+}
+
+class _TodayScreenState extends State<TodayScreen> {
+  final logText = TextEditingController();
+  bool isLogging = false;
+  String errorMessage = '';
+  String question = '';
+
+  DateTime get today => _dateOnly(DateTime.now());
+  String get token => widget.auth.session?.backendToken ?? '';
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.state.whoop.connected) {
+      _syncWhoop();
+    }
+  }
+
+  @override
+  void dispose() {
+    logText.dispose();
+    super.dispose();
+  }
+
+  Future<void> _syncWhoop() async {
+    try {
+      final snapshot = await WhoopApiClient(
+        widget.state.whoopBackendUrl,
+        token: token,
+      ).fetchSummary(today);
+      await widget.state.applyWhoopSnapshot(snapshot);
+    } on WhoopSyncException {
+      // Today still works from what was typed; WHOOP fills in when reachable.
+    }
+  }
+
+  Future<void> _submit() async {
+    final text = logText.text.trim();
+    if (text.isEmpty || isLogging) {
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    setState(() {
+      isLogging = true;
+      errorMessage = '';
+    });
+    try {
+      final log = await LogApiClient(
+        widget.auth.authBackendUrl,
+        token,
+      ).parse(text);
+      await widget.state.applyLog(log, today);
+      logText.clear();
+      setState(() {
+        question = log.question ?? '';
+      });
+    } catch (error) {
+      setState(() {
+        errorMessage = error.toString();
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          isLogging = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = widget.state;
+    final eaten = state.consumedFor(today);
+    final burned = state.totalBurnFor(today);
+    final remaining = state.remainingFoodBudgetFor(today);
+    final foods = state.entriesFor(today);
+    final workouts = state.activitiesFor(today);
+    final steps = state.stepsFor(today);
+    final textTheme = Theme.of(context).textTheme;
+
+    return RefreshIndicator(
+      onRefresh: _syncWhoop,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
+        children: [
+          Text(
+            _displayDate(today),
+            style: const TextStyle(color: _blue, fontWeight: FontWeight.w800),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.monitor_weight),
-            selectedIcon: Icon(Icons.monitor_weight),
-            label: 'Weight',
+          const SizedBox(height: 12),
+          Panel(
+            padding: 18,
+            child: Column(
+              children: [
+                Text(
+                  '${remaining.abs()}',
+                  style: textTheme.displayMedium?.copyWith(
+                    color: remaining >= 0 ? _ink : _romanRed,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                Text(
+                  remaining >= 0 ? 'left to eat' : 'over',
+                  style: const TextStyle(
+                    color: _blue,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  'eaten ${eaten.calories} · burned $burned'
+                  '${steps > 0 ? ' · $steps steps' : ''}',
+                  style: const TextStyle(
+                    color: _ink,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                if (eaten.protein > 0)
+                  Text(
+                    '${_formatNumber(eaten.protein.roundToDouble())}g protein',
+                    style: const TextStyle(color: _olive),
+                  ),
+              ],
+            ),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.flag),
-            selectedIcon: Icon(Icons.flag),
-            label: 'Events',
+          const SizedBox(height: 12),
+          TodayWeightLine(state: state, today: today),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey('todayLogField'),
+            controller: logText,
+            minLines: 2,
+            maxLines: 8,
+            textInputAction: TextInputAction.newline,
+            decoration: InputDecoration(
+              hintText: 'What did you eat or do?',
+              suffixIcon: isLogging
+                  ? const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                    )
+                  : IconButton(
+                      key: const ValueKey('todayLogSend'),
+                      tooltip: 'Log it',
+                      onPressed: _submit,
+                      icon: const Icon(Icons.send),
+                    ),
+            ),
           ),
+          if (errorMessage.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(
+              errorMessage,
+              style: const TextStyle(
+                color: _romanRed,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+          if (question.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Panel(
+              child: Row(
+                children: [
+                  const Icon(Icons.help_outline, color: _bronze),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(question)),
+                  IconButton(
+                    tooltip: 'Dismiss',
+                    onPressed: () => setState(() => question = ''),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          for (final workout in workouts)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.local_fire_department, color: _bronze),
+              title: Text(workout.name),
+              trailing: Text('-${workout.caloriesBurned}'),
+            ),
+          for (final entry in foods)
+            Dismissible(
+              key: ValueKey(entry.id),
+              direction: DismissDirection.endToStart,
+              onDismissed: (_) => state.deleteEntry(entry.id),
+              background: Container(
+                alignment: Alignment.centerRight,
+                padding: const EdgeInsets.only(right: 16),
+                color: _romanRed,
+                child: const Icon(Icons.delete, color: Colors.white),
+              ),
+              child: ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(entry.name),
+                subtitle: entry.notes.isEmpty ? null : Text(entry.notes),
+                trailing: Text('${entry.nutrition.calories}'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class TodayWeightLine extends StatelessWidget {
+  const TodayWeightLine({super.key, required this.state, required this.today});
+
+  final SculptusState state;
+  final DateTime today;
+
+  @override
+  Widget build(BuildContext context) {
+    final trend = state.weightTrendFor(today);
+    if (trend == null) {
+      return const Text(
+        'Add a morning weigh-in to your log ("weighed 202") to see your trend.',
+        style: TextStyle(color: _blue),
+      );
+    }
+    final latest = state.latestWeight;
+    final isToday = latest != null && _dateKey(latest.date) == _dateKey(today);
+    final gap = isToday ? latest.weight - trend : 0.0;
+    return Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Weight ${trend.toStringAsFixed(1)} lb (7-day average)',
+            style: const TextStyle(color: _ink, fontWeight: FontWeight.w900),
+          ),
+          if (gap.abs() >= 1.5)
+            Text(
+              'Scale said ${_formatNumber(latest!.weight)} today. Daily '
+              'swings like that are mostly water and food; the average is '
+              'what counts.',
+              style: const TextStyle(color: _blue),
+            ),
         ],
       ),
     );

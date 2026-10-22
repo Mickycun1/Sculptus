@@ -12,8 +12,29 @@ Future<void> signInForTest(WidgetTester tester) async {
   await tester.pumpAndSettle();
 }
 
+Future<SculptusState> pumpScreen(
+  WidgetTester tester,
+  Widget Function(SculptusState state) builder,
+) async {
+  SharedPreferences.setMockInitialValues({});
+  final state = SculptusState();
+  await state.load();
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: AnimatedBuilder(
+          animation: state,
+          builder: (context, _) => builder(state),
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+  return state;
+}
+
 void main() {
-  testWidgets('Sculptus opens to the daily prompts', (tester) async {
+  testWidgets('Sculptus opens to the one-box Today screen', (tester) async {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(const SculptusApp());
@@ -21,6 +42,71 @@ void main() {
     await signInForTest(tester);
 
     expect(find.text('Sculptus'), findsOneWidget);
+    expect(find.text('What did you eat or do?'), findsOneWidget);
+    expect(find.text('left to eat'), findsOneWidget);
+    expect(find.byType(NavigationBar), findsNothing);
+  });
+
+  test('a parsed log becomes food, burn, steps and weight', () async {
+    SharedPreferences.setMockInitialValues({});
+    final state = SculptusState();
+    await state.load();
+    final day = DateTime(2026, 10, 22);
+
+    await state.applyLog(
+      LoggedDay.fromJson({
+        'foods': [
+          {
+            'name': '3 bananas',
+            'calories': 315,
+            'caloriesLow': 300,
+            'caloriesHigh': 330,
+            'proteinGrams': 4,
+            'assumption': '',
+          },
+          {
+            'name': '10 mints',
+            'calories': 150,
+            'caloriesLow': 150,
+            'caloriesHigh': 150,
+            'proteinGrams': 0,
+            'assumption': 'label says 15 kcal each',
+          },
+        ],
+        'workouts': [
+          {'name': 'CrossFit', 'caloriesBurned': 523, 'minutes': 29},
+        ],
+        'steps': 12000,
+        'weightLb': 202,
+        'question': null,
+      }),
+      day,
+    );
+
+    expect(state.consumedFor(day).calories, 465);
+    expect(state.activityBurnFor(day), 523);
+    expect(state.stepsFor(day), 12000);
+    expect(state.weightTrendFor(day), 202);
+    expect(
+      state.entriesFor(day).map((entry) => entry.notes),
+      contains('150-150 kcal · label says 15 kcal each'),
+    );
+
+    await state.applyWhoopSnapshot(
+      WhoopSnapshot(
+        connected: true,
+        summaryDate: day,
+        todayWorkoutCalories: 540,
+        todayWorkoutCount: 1,
+        latestWorkoutName: 'functional fitness',
+      ),
+    );
+    expect(state.activityBurnFor(day), 540);
+  });
+
+  testWidgets('Gauge screen still shows the daily prompts', (tester) async {
+    await pumpScreen(tester, (state) => DashboardScreen(state: state));
+
     expect(find.text('Did you workout?'), findsOneWidget);
     expect(find.text('Steps'), findsOneWidget);
     await tester.drag(find.byType(ListView).first, const Offset(0, -500));
@@ -55,14 +141,7 @@ one spring roll and one fried dumpling
   testWidgets('food dialog can save without a framework exception', (
     tester,
   ) async {
-    SharedPreferences.setMockInitialValues({});
-
-    await tester.pumpWidget(const SculptusApp());
-    await tester.pumpAndSettle();
-    await signInForTest(tester);
-
-    await tester.tap(find.byIcon(Icons.edit_note).last);
-    await tester.pumpAndSettle();
+    await pumpScreen(tester, (state) => DiaryScreen(state: state));
 
     await tester.tap(find.text('Food').last);
     await tester.pumpAndSettle();
@@ -81,11 +160,7 @@ one spring roll and one fried dumpling
   });
 
   testWidgets('workout dialog does not ask for steps', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-
-    await tester.pumpWidget(const SculptusApp());
-    await tester.pumpAndSettle();
-    await signInForTest(tester);
+    await pumpScreen(tester, (state) => DashboardScreen(state: state));
 
     await tester.tap(find.text('Log').first);
     await tester.pumpAndSettle();
@@ -96,11 +171,7 @@ one spring roll and one fried dumpling
   });
 
   testWidgets('steps dialog logs current and projected steps', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-
-    await tester.pumpWidget(const SculptusApp());
-    await tester.pumpAndSettle();
-    await signInForTest(tester);
+    await pumpScreen(tester, (state) => DashboardScreen(state: state));
 
     await tester.tap(find.text('Log').at(1));
     await tester.pumpAndSettle();
@@ -119,19 +190,15 @@ one spring roll and one fried dumpling
   });
 
   testWidgets('weight screen exposes WHOOP sync controls', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-
-    await tester.pumpWidget(const SculptusApp());
-    await tester.pumpAndSettle();
-    await signInForTest(tester);
-
-    await tester.tap(find.text('Weight'));
-    await tester.pumpAndSettle();
+    await pumpScreen(tester, (state) => WeightScreen(state: state));
 
     expect(find.text('WHOOP'), findsOneWidget);
     expect(find.text('Sync day'), findsOneWidget);
     expect(find.text('Backend'), findsOneWidget);
-    expect(find.text('http://127.0.0.1:8787'), findsOneWidget);
+    expect(
+      find.text('https://sculptus-backend-oae5ydvgvq-ue.a.run.app'),
+      findsOneWidget,
+    );
   });
 
   test('WHOOP sync imports selected-day workout burn', () async {
@@ -165,11 +232,7 @@ one spring roll and one fried dumpling
   });
 
   testWidgets('food estimator dialog can log pasted food text', (tester) async {
-    SharedPreferences.setMockInitialValues({});
-
-    await tester.pumpWidget(const SculptusApp());
-    await tester.pumpAndSettle();
-    await signInForTest(tester);
+    await pumpScreen(tester, (state) => DashboardScreen(state: state));
 
     await tester.drag(find.byType(ListView).first, const Offset(0, -500));
     await tester.pumpAndSettle();

@@ -6,6 +6,8 @@ export const config = {
   mongoDbName: process.env.MONGODB_DB ?? "sculptus",
   userKey: process.env.SCULPTUS_USER_KEY ?? "local-user",
   googleWebClientId: process.env.GOOGLE_WEB_CLIENT_ID ?? "",
+  appleBundleId: process.env.APPLE_BUNDLE_ID ?? "ai.dynafex.sculptus",
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
   authSessionDays: Number(process.env.AUTH_SESSION_DAYS ?? 30),
   allowLocalAuth: process.env.SCULPTUS_ALLOW_LOCAL_AUTH !== "false",
   whoopClientId: process.env.WHOOP_CLIENT_ID ?? "",

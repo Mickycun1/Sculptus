@@ -2,8 +2,10 @@ import cors from "cors";
 import express from "express";
 import crypto from "node:crypto";
 import { OAuth2Client } from "google-auth-library";
-import { createAuthStore } from "./authStore.js";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import { type AppUser, createAuthStore } from "./authStore.js";
 import { assertWhoopConfig, config } from "./config.js";
+import { LogParser } from "./logParser.js";
 import { createTokenStore } from "./tokenStore.js";
 import { WhoopClient } from "./whoopClient.js";
 
@@ -11,14 +13,18 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const oauthStates = new Map<string, number>();
+const oauthStates = new Map<string, { userId: string; expiresAt: number }>();
 const authStore = await createAuthStore(config.mongoUri, config.mongoDbName);
 const tokenStore = await createTokenStore(config.mongoUri, config.mongoDbName);
 const whoop = new WhoopClient(tokenStore);
 const googleClient = new OAuth2Client(config.googleWebClientId || undefined);
+const appleKeys = createRemoteJWKSet(
+  new URL("https://appleid.apple.com/auth/keys")
+);
+const logParser = new LogParser(config.anthropicApiKey);
 
 function newOauthState() {
-  return crypto.randomBytes(4).toString("hex");
+  return crypto.randomBytes(16).toString("hex");
 }
 
 function handleError(error: unknown, response: express.Response) {
@@ -31,6 +37,18 @@ function bearerToken(request: express.Request) {
   const authorization = request.header("authorization") ?? "";
   const [scheme, token] = authorization.split(" ");
   return scheme?.toLowerCase() === "bearer" ? token : "";
+}
+
+async function requireUser(
+  request: express.Request,
+  response: express.Response
+): Promise<AppUser | null> {
+  const token = bearerToken(request);
+  const user = token ? await authStore.getUserForSession(token) : null;
+  if (!user) {
+    response.status(401).json({ error: "Sign in again." });
+  }
+  return user;
 }
 
 app.get("/health", (_request, response) => {
@@ -66,6 +84,45 @@ app.post("/api/auth/google", async (request, response) => {
       email: payload.email,
       displayName: payload.name ?? payload.email,
       photoUrl: payload.picture
+    });
+    const session = await authStore.createSession(
+      user.id,
+      config.authSessionDays
+    );
+
+    response.json({ user, session });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/auth/apple", async (request, response) => {
+  try {
+    const identityToken = String(request.body?.identityToken ?? "");
+    if (!identityToken) {
+      response.status(400).json({ error: "Missing Apple identity token." });
+      return;
+    }
+
+    const { payload } = await jwtVerify(identityToken, appleKeys, {
+      issuer: "https://appleid.apple.com",
+      audience: config.appleBundleId
+    });
+    if (!payload.sub) {
+      response.status(401).json({ error: "Invalid Apple identity." });
+      return;
+    }
+
+    const email =
+      typeof payload.email === "string"
+        ? payload.email
+        : String(request.body?.email ?? "");
+    const displayName = String(request.body?.displayName ?? "").trim();
+    const user = await authStore.upsertUser({
+      provider: "apple",
+      providerSubject: payload.sub,
+      email,
+      displayName: displayName || email || "Sculptus athlete"
     });
     const session = await authStore.createSession(
       user.id,
@@ -140,11 +197,57 @@ app.post("/api/auth/logout", async (request, response) => {
   }
 });
 
-app.get("/api/whoop/connect", (_request, response) => {
+app.delete("/api/account", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    try {
+      await whoop.revoke(user.id);
+    } catch {
+      // Deleting the account must not depend on WHOOP being reachable.
+    }
+    await authStore.deleteUser(user.id);
+    response.status(204).send();
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/log", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    const text = String(request.body?.text ?? "").trim();
+    if (!text) {
+      response.status(400).json({ error: "Tell me what you ate or did." });
+      return;
+    }
+    if (text.length > 8000) {
+      response.status(400).json({ error: "That log is too long." });
+      return;
+    }
+    response.json(await logParser.parse(text));
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.get("/api/whoop/connect", async (request, response) => {
   try {
     assertWhoopConfig();
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
     const state = newOauthState();
-    oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+    oauthStates.set(state, {
+      userId: user.id,
+      expiresAt: Date.now() + 10 * 60 * 1000
+    });
     response.json({
       authorizationUrl: whoop.buildAuthorizationUrl(state),
       scopes: config.whoopScopes
@@ -159,19 +262,19 @@ app.get("/api/whoop/callback", async (request, response) => {
     assertWhoopConfig();
     const code = String(request.query.code ?? "");
     const state = String(request.query.state ?? "");
-    const expiresAt = oauthStates.get(state) ?? 0;
+    const pending = oauthStates.get(state);
 
     if (!code) {
       response.status(400).send("Missing WHOOP authorization code.");
       return;
     }
-    if (!state || expiresAt < Date.now()) {
+    if (!pending || pending.expiresAt < Date.now()) {
       response.status(400).send("Invalid or expired WHOOP OAuth state.");
       return;
     }
 
     oauthStates.delete(state);
-    await whoop.exchangeCode(config.userKey, code);
+    await whoop.exchangeCode(pending.userId, code);
     response
       .status(200)
       .send("WHOOP connected. You can return to Sculptus and sync the day.");
@@ -184,11 +287,15 @@ app.get("/api/whoop/callback", async (request, response) => {
 app.get("/api/whoop/summary", async (request, response) => {
   try {
     assertWhoopConfig();
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
     const date =
       typeof request.query.date === "string"
         ? request.query.date
         : new Date().toISOString().slice(0, 10);
-    const summary = await whoop.dailySummary(config.userKey, date);
+    const summary = await whoop.dailySummary(user.id, date);
     response.json(summary);
   } catch (error) {
     handleError(error, response);
@@ -198,11 +305,15 @@ app.get("/api/whoop/summary", async (request, response) => {
 app.get("/api/whoop/steps", async (request, response) => {
   try {
     assertWhoopConfig();
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
     const date =
       typeof request.query.date === "string"
         ? request.query.date
         : new Date().toISOString().slice(0, 10);
-    const summary = await whoop.dailySummary(config.userKey, date);
+    const summary = await whoop.dailySummary(user.id, date);
     response.json({
       date,
       steps: summary.steps,
@@ -214,10 +325,14 @@ app.get("/api/whoop/steps", async (request, response) => {
   }
 });
 
-app.post("/api/whoop/disconnect", async (_request, response) => {
+app.post("/api/whoop/disconnect", async (request, response) => {
   try {
     assertWhoopConfig();
-    await whoop.revoke(config.userKey);
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    await whoop.revoke(user.id);
     response.status(204).send();
   } catch (error) {
     handleError(error, response);
