@@ -1103,6 +1103,7 @@ class LoggedWorkout {
 class LoggedDay {
   const LoggedDay({
     this.foods = const [],
+    this.considering = const [],
     this.workouts = const [],
     this.steps,
     this.weightLb,
@@ -1110,6 +1111,7 @@ class LoggedDay {
   });
 
   final List<LoggedFood> foods;
+  final List<LoggedFood> considering;
   final List<LoggedWorkout> workouts;
   final int? steps;
   final double? weightLb;
@@ -1118,6 +1120,9 @@ class LoggedDay {
   factory LoggedDay.fromJson(Map<String, dynamic> json) {
     return LoggedDay(
       foods: (json['foods'] as List? ?? const [])
+          .map((item) => LoggedFood.fromJson(Map<String, dynamic>.from(item)))
+          .toList(),
+      considering: (json['considering'] as List? ?? const [])
           .map((item) => LoggedFood.fromJson(Map<String, dynamic>.from(item)))
           .toList(),
       workouts: (json['workouts'] as List? ?? const [])
@@ -2772,6 +2777,7 @@ class _TodayScreenState extends State<TodayScreen> {
   bool isLogging = false;
   String errorMessage = '';
   String question = '';
+  List<LoggedFood> considering = const [];
 
   DateTime get today => _dateOnly(DateTime.now());
   String get token => widget.auth.session?.backendToken ?? '';
@@ -2951,6 +2957,7 @@ class _TodayScreenState extends State<TodayScreen> {
       logText.clear();
       setState(() {
         question = log.question ?? '';
+        considering = log.considering;
       });
     } catch (error) {
       setState(() {
@@ -3094,6 +3101,23 @@ class _TodayScreenState extends State<TodayScreen> {
               ),
             ),
           ],
+          if (considering.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            ConsideringPanel(
+              options: considering,
+              balance: balance,
+              hasMaintenance: maintenance != null,
+              onAte: (food) async {
+                setState(() {
+                  considering = [
+                    for (final option in considering)
+                      if (option != food) option,
+                  ];
+                });
+                await state.applyLog(LoggedDay(foods: [food]), today);
+              },
+            ),
+          ],
           const SizedBox(height: 12),
           for (final workout in workouts)
             ListTile(
@@ -3123,6 +3147,57 @@ class _TodayScreenState extends State<TodayScreen> {
         ],
       ),
     );
+  }
+}
+
+class ConsideringPanel extends StatelessWidget {
+  const ConsideringPanel({
+    super.key,
+    required this.options,
+    required this.balance,
+    required this.hasMaintenance,
+    required this.onAte,
+  });
+
+  final List<LoggedFood> options;
+  final int balance;
+  final bool hasMaintenance;
+  final ValueChanged<LoggedFood> onAte;
+
+  @override
+  Widget build(BuildContext context) {
+    return Panel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'If you add...',
+            style: TextStyle(color: _blue, fontWeight: FontWeight.w800),
+          ),
+          for (final food in options)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(food.name),
+              subtitle: Text(_afterText(food)),
+              trailing: TextButton(
+                onPressed: () => onAte(food),
+                child: const Text('Ate it'),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  String _afterText(LoggedFood food) {
+    final after = balance - food.calories;
+    final protein = food.proteinGrams > 0
+        ? ' · ${_formatNumber(food.proteinGrams.roundToDouble())}g protein'
+        : '';
+    final label = hasMaintenance
+        ? (after >= 0 ? 'deficit ${after.abs()}' : 'surplus ${after.abs()}')
+        : (after >= 0 ? '${after.abs()} left' : '${after.abs()} over');
+    return '+${food.calories}$protein · $label';
   }
 }
 

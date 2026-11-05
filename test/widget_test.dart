@@ -141,6 +141,55 @@ void main() {
     expect(maintenance - state.consumedFor(day).calories, 2476);
   });
 
+  test('considered foods are parsed but not logged as eaten', () async {
+    SharedPreferences.setMockInitialValues({});
+    final state = SculptusState();
+    await state.load();
+    final day = DateTime(2026, 11, 1);
+    final log = LoggedDay.fromJson({
+      'foods': [],
+      'considering': [
+        {'name': 'Popcorn', 'calories': 150, 'proteinGrams': 4},
+      ],
+    });
+
+    await state.applyLog(log, day);
+
+    expect(log.considering.single.name, 'Popcorn');
+    expect(state.consumedFor(day).calories, 0);
+  });
+
+  testWidgets('considering panel shows the deficit after and logs on Ate it', (
+    tester,
+  ) async {
+    LoggedFood? ate;
+    const option = LoggedFood(
+      name: '200g Greek yogurt + 1/2 scoop whey',
+      calories: 170,
+      caloriesLow: 150,
+      caloriesHigh: 190,
+      proteinGrams: 30,
+      assumption: '',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ConsideringPanel(
+            options: const [option],
+            balance: 768,
+            hasMaintenance: true,
+            onAte: (food) => ate = food,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('If you add...'), findsOneWidget);
+    expect(find.text('+170 · 30g protein · deficit 598'), findsOneWidget);
+    await tester.tap(find.text('Ate it'));
+    expect(ate, option);
+  });
+
   testWidgets('Gauge screen still shows the daily prompts', (tester) async {
     await pumpScreen(tester, (state) => DashboardScreen(state: state));
 
