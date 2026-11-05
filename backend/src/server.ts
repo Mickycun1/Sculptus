@@ -6,6 +6,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { type AppUser, createAuthStore } from "./authStore.js";
 import { assertWhoopConfig, config } from "./config.js";
 import { LogParser } from "./logParser.js";
+import { createMealStore } from "./mealStore.js";
 import { createTokenStore } from "./tokenStore.js";
 import { WhoopClient } from "./whoopClient.js";
 
@@ -17,6 +18,7 @@ const oauthStates = new Map<string, { userId: string; expiresAt: number }>();
 const authStore = await createAuthStore(config.mongoUri, config.mongoDbName);
 const tokenStore = await createTokenStore(config.mongoUri, config.mongoDbName);
 const whoop = new WhoopClient(tokenStore);
+const mealStore = await createMealStore(config.mongoUri, config.mongoDbName);
 const googleClient = new OAuth2Client(config.googleWebClientId || undefined);
 const appleKeys = createRemoteJWKSet(
   new URL("https://appleid.apple.com/auth/keys")
@@ -208,6 +210,7 @@ app.delete("/api/account", async (request, response) => {
     } catch {
       // Deleting the account must not depend on WHOOP being reachable.
     }
+    await mealStore.removeAll(user.id);
     await authStore.deleteUser(user.id);
     response.status(204).send();
   } catch (error) {
@@ -230,7 +233,60 @@ app.post("/api/log", async (request, response) => {
       response.status(400).json({ error: "That log is too long." });
       return;
     }
-    response.json(await logParser.parse(text));
+    response.json(await logParser.parse(text, await mealStore.list(user.id)));
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.get("/api/meals", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    response.json({ meals: await mealStore.list(user.id) });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.put("/api/meals", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    const name = String(request.body?.name ?? "").trim().slice(0, 80);
+    const calories = Math.round(Number(request.body?.calories));
+    const proteinGrams = Number(request.body?.proteinGrams ?? 0);
+    if (!name || !Number.isFinite(calories) || calories < 0 || calories > 5000) {
+      response.status(400).json({ error: "A meal needs a name and calories." });
+      return;
+    }
+    if ((await mealStore.list(user.id)).length >= 100) {
+      response.status(400).json({ error: "You can save up to 100 meals." });
+      return;
+    }
+    await mealStore.save(user.id, {
+      name,
+      calories,
+      proteinGrams: Number.isFinite(proteinGrams) ? Math.max(0, proteinGrams) : 0
+    });
+    response.json({ meals: await mealStore.list(user.id) });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.delete("/api/meals/:name", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    await mealStore.remove(user.id, request.params.name);
+    response.json({ meals: await mealStore.list(user.id) });
   } catch (error) {
     handleError(error, response);
   }

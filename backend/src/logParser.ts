@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
+import type { SavedMeal } from "./mealStore.js";
 
 const FoodSchema = z.object({
   name: z.string(),
@@ -48,6 +49,8 @@ Activity:
 
 question: ask one short question only when a single item's uncertainty could move the day's total by 100 kcal or more, and the answer is something the person can easily check. Say how much the answer changes the total ("Was the egg white carton 16 or 32 oz? That changes your half by about 125 kcal."). Otherwise null. Never ask more than one.
 
+Saved meals: the person may have saved meals with known numbers. When the log mentions one, even loosely ("my usual yogurt bowl"), use its calories and protein exactly, scaled for the portion ("half my Mexican bowl"), keep a tight range, and note "saved meal" in assumption. Only add on top of it for extras they mention.
+
 Ignore commentary, feelings, and anything that is not food, activity, or weight.`;
 
 export class LogParser {
@@ -57,7 +60,10 @@ export class LogParser {
     this.client = new Anthropic({ apiKey });
   }
 
-  async parse(text: string): Promise<DayLog> {
+  async parse(text: string, savedMeals: SavedMeal[] = []): Promise<DayLog> {
+    const content = savedMeals.length
+      ? `Saved meals:\n${JSON.stringify(savedMeals)}\n\nLog:\n${text}`
+      : text;
     const response = await this.client.beta.messages.parse({
       model: "claude-opus-5-5",
       max_tokens: 16000,
@@ -68,7 +74,7 @@ export class LogParser {
         format: betaZodOutputFormat(DayLogSchema)
       },
       system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: text }]
+      messages: [{ role: "user", content }]
     });
 
     if (response.stop_reason === "refusal") {

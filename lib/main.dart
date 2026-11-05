@@ -1151,6 +1151,57 @@ class LogApiClient {
   }
 }
 
+class SavedMeal {
+  const SavedMeal({
+    required this.name,
+    required this.calories,
+    required this.proteinGrams,
+  });
+
+  final String name;
+  final int calories;
+  final double proteinGrams;
+
+  factory SavedMeal.fromJson(Map<String, dynamic> json) {
+    return SavedMeal(
+      name: json['name'] as String? ?? '',
+      calories: (json['calories'] as num?)?.round() ?? 0,
+      proteinGrams: (json['proteinGrams'] as num?)?.toDouble() ?? 0,
+    );
+  }
+}
+
+class MealsApiClient {
+  const MealsApiClient(this.baseUrl, this.token);
+
+  final String baseUrl;
+  final String token;
+
+  Future<List<SavedMeal>> list() => _send('GET', '/api/meals', const {});
+
+  Future<List<SavedMeal>> save(SavedMeal meal) => _send('PUT', '/api/meals', {
+    'name': meal.name,
+    'calories': meal.calories,
+    'proteinGrams': meal.proteinGrams,
+  });
+
+  Future<List<SavedMeal>> remove(String name) =>
+      _send('DELETE', '/api/meals/${Uri.encodeComponent(name)}', const {});
+
+  Future<List<SavedMeal>> _send(
+    String method,
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    final json = await AuthBackendClient(
+      baseUrl,
+    ).sendJson(method, path, body, token: token);
+    return (json['meals'] as List? ?? const [])
+        .map((item) => SavedMeal.fromJson(Map<String, dynamic>.from(item)))
+        .toList();
+  }
+}
+
 class AuthException implements Exception {
   const AuthException(this.message);
 
@@ -2677,6 +2728,7 @@ class _HomeShellState extends State<HomeShell> {
                 child: Text(widget.auth.session?.shortName ?? 'Signed in'),
               ),
               const PopupMenuDivider(),
+              const PopupMenuItem(value: 'my_meals', child: Text('My meals')),
               const PopupMenuItem(
                 value: 'connect_whoop',
                 child: Text('Connect WHOOP'),
@@ -2702,6 +2754,16 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _onMenuSelected(String value) async {
     switch (value) {
+      case 'my_meals':
+        final meals = MealsApiClient(
+          widget.auth.authBackendUrl,
+          widget.auth.session?.backendToken ?? '',
+        );
+        await showDialog<void>(
+          context: context,
+          builder: (context) =>
+              MyMealsDialog(load: meals.list, remove: meals.remove),
+        );
       case 'connect_whoop':
         await _connectWhoop();
       case 'privacy_policy':
@@ -2935,6 +2997,83 @@ class _TodayScreenState extends State<TodayScreen> {
     inches.dispose();
   }
 
+  Future<void> _rememberMeal(DiaryEntry entry) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final name = TextEditingController(text: entry.name);
+    final calories = TextEditingController(
+      text: '${entry.nutrition.calories}',
+    );
+    final protein = TextEditingController(
+      text: _formatNumber(entry.nutrition.protein.roundToDouble()),
+    );
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Remember this meal'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Give it the name you type and its real numbers. Sculptus will '
+              'use them whenever you mention it.',
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              key: const ValueKey('mealName'),
+              controller: name,
+              decoration: const InputDecoration(labelText: 'Name'),
+            ),
+            TextField(
+              key: const ValueKey('mealCalories'),
+              controller: calories,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Calories'),
+            ),
+            TextField(
+              key: const ValueKey('mealProtein'),
+              controller: protein,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Protein (g)'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    final meal = SavedMeal(
+      name: name.text.trim(),
+      calories: _readInt(calories.text),
+      proteinGrams: _readDouble(protein.text),
+    );
+    name.dispose();
+    calories.dispose();
+    protein.dispose();
+    if (saved != true || meal.name.isEmpty) {
+      return;
+    }
+    try {
+      await MealsApiClient(widget.auth.authBackendUrl, token).save(meal);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Saved. ${meal.name} will count as ${meal.calories} kcal.',
+          ),
+        ),
+      );
+    } catch (error) {
+      messenger.showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
   Future<void> _submit() async {
     final text = logText.text.trim();
     if (text.isEmpty || isLogging) {
@@ -3142,10 +3281,90 @@ class _TodayScreenState extends State<TodayScreen> {
                 title: Text(entry.name),
                 subtitle: entry.notes.isEmpty ? null : Text(entry.notes),
                 trailing: Text('${entry.nutrition.calories}'),
+                onLongPress: () => _rememberMeal(entry),
               ),
             ),
         ],
       ),
+    );
+  }
+}
+
+class MyMealsDialog extends StatefulWidget {
+  const MyMealsDialog({super.key, required this.load, required this.remove});
+
+  final Future<List<SavedMeal>> Function() load;
+  final Future<List<SavedMeal>> Function(String name) remove;
+
+  @override
+  State<MyMealsDialog> createState() => _MyMealsDialogState();
+}
+
+class _MyMealsDialogState extends State<MyMealsDialog> {
+  List<SavedMeal>? meals;
+  String errorMessage = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _run(widget.load);
+  }
+
+  Future<void> _run(Future<List<SavedMeal>> Function() action) async {
+    try {
+      final result = await action();
+      if (mounted) {
+        setState(() => meals = result);
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => errorMessage = error.toString());
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final meals = this.meals;
+    return AlertDialog(
+      title: const Text('My meals'),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: errorMessage.isNotEmpty
+            ? Text(errorMessage)
+            : meals == null
+            ? const Center(child: CircularProgressIndicator())
+            : meals.isEmpty
+            ? const Text(
+                'Long-press any food on Today to remember it with its real '
+                'numbers.',
+              )
+            : ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final meal in meals)
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(meal.name),
+                      subtitle: Text(
+                        '${meal.calories} kcal · '
+                        '${_formatNumber(meal.proteinGrams.roundToDouble())}g protein',
+                      ),
+                      trailing: IconButton(
+                        tooltip: 'Forget ${meal.name}',
+                        onPressed: () => _run(() => widget.remove(meal.name)),
+                        icon: const Icon(Icons.delete_outline),
+                      ),
+                    ),
+                ],
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Done'),
+        ),
+      ],
     );
   }
 }

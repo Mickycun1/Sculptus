@@ -190,6 +190,31 @@ void main() {
     expect(ate, option);
   });
 
+  testWidgets('My meals lists saved meals and forgets one', (tester) async {
+    var meals = [
+      const SavedMeal(name: 'Mexican bowl', calories: 640, proteinGrams: 48),
+      const SavedMeal(name: 'Earth Bowl', calories: 720, proteinGrams: 35),
+    ];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MyMealsDialog(
+            load: () async => meals,
+            remove: (name) async =>
+                meals = [for (final m in meals) if (m.name != name) m],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('640 kcal · 48g protein'), findsOneWidget);
+    await tester.tap(find.byTooltip('Forget Mexican bowl'));
+    await tester.pumpAndSettle();
+    expect(find.text('Mexican bowl'), findsNothing);
+    expect(find.text('Earth Bowl'), findsOneWidget);
+  });
+
   testWidgets('Gauge screen still shows the daily prompts', (tester) async {
     await pumpScreen(tester, (state) => DashboardScreen(state: state));
 
