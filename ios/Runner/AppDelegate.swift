@@ -7,7 +7,6 @@ import UIKit
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GeneratedPluginRegistrant.register(with: self)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 }
@@ -20,6 +19,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     willConnectTo session: UISceneSession,
     options connectionOptions: UIScene.ConnectionOptions
   ) {
-    (UIApplication.shared.delegate as? FlutterAppDelegate)?.window = window
+    guard let appDelegate = UIApplication.shared.delegate as? FlutterAppDelegate else {
+      return
+    }
+    appDelegate.window = window
+    GeneratedPluginRegistrant.register(with: appDelegate)
   }
 }
