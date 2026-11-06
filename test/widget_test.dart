@@ -305,6 +305,31 @@ void main() {
     expect(state.isActivityOverridden(whoop), isTrue);
   });
 
+  test('a WOD estimate wins over a tracker number typed in the log', () async {
+    SharedPreferences.setMockInitialValues({});
+    final state = SculptusState();
+    await state.load();
+    final day = DateTime(2026, 11, 6);
+
+    await state.applyLog(
+      LoggedDay.fromJson({
+        'workouts': [
+          {
+            'name': 'CrossFit',
+            'caloriesBurned': 571,
+            'estimatedCaloriesBurned': 400,
+            'minutes': 0,
+            'details': '5 rounds; 21:30',
+          },
+        ],
+      }),
+      day,
+    );
+
+    expect(state.activityBurnFor(day), 400);
+    expect(state.activitiesFor(day).single.notes, contains('Tracker said 571'));
+  });
+
   test('weigh-ins give a 7-day average, weekly change and series', () async {
     SharedPreferences.setMockInitialValues({});
     final state = SculptusState();

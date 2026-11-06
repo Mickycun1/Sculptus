@@ -2233,11 +2233,13 @@ class SculptusState extends ChangeNotifier {
       );
     }
 
+    if (log.workouts.any((workout) => workout.estimatedCaloriesBurned > 0)) {
+      activities.removeWhere((entry) => entry.id.startsWith('wod-$key'));
+    }
     for (final workout in log.workouts) {
-      if (workout.caloriesBurned > 0 || workout.estimatedCaloriesBurned <= 0) {
+      if (workout.estimatedCaloriesBurned <= 0) {
         continue;
       }
-      activities.removeWhere((entry) => entry.id.startsWith('wod-$key'));
       activities.add(
         ActivityEntry(
           id: 'wod-$key-${_newId('w')}',
@@ -2245,7 +2247,11 @@ class SculptusState extends ChangeNotifier {
           name: workout.name,
           caloriesBurned: workout.estimatedCaloriesBurned,
           minutes: workout.minutes,
-          notes: workout.details,
+          notes: [
+            workout.details,
+            if (workout.caloriesBurned > 0)
+              'Tracker said ${workout.caloriesBurned}',
+          ].where((part) => part.isNotEmpty).join(' · '),
           createdAt: now,
         ),
       );
@@ -2254,7 +2260,8 @@ class SculptusState extends ChangeNotifier {
     final hasWhoopWorkout = activities.any((entry) => entry.id == 'whoop-$key');
     if (!hasWhoopWorkout) {
       for (final workout in log.workouts) {
-        if (workout.caloriesBurned <= 0) {
+        if (workout.caloriesBurned <= 0 ||
+            workout.estimatedCaloriesBurned > 0) {
           continue;
         }
         activities.add(
