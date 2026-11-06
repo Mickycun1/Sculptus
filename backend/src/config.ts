@@ -8,6 +8,8 @@ export const config = {
   googleWebClientId: process.env.GOOGLE_WEB_CLIENT_ID ?? "",
   appleBundleId: process.env.APPLE_BUNDLE_ID ?? "ai.dynafex.sculptus",
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
+  resendApiKey: process.env.RESEND_API_KEY ?? "",
+  mailFrom: process.env.MAIL_FROM ?? "Sculptus <no-reply@dynafex.ai>",
   authSessionDays: Number(process.env.AUTH_SESSION_DAYS ?? 30),
   allowLocalAuth: process.env.SCULPTUS_ALLOW_LOCAL_AUTH !== "false",
   whoopClientId: process.env.WHOOP_CLIENT_ID ?? "",

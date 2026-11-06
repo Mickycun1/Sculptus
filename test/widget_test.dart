@@ -1,16 +1,48 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sculptus/main.dart';
+import 'package:shadcn_ui/shadcn_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-Future<void> signInForTest(WidgetTester tester) async {
-  await tester.enterText(
-    find.byKey(const ValueKey('authEmailField')),
-    'mick@example.com',
+Widget shadHarness(Widget child) {
+  return ShadApp.custom(
+    theme: sculptusTheme(Brightness.light),
+    appBuilder: (context) => MaterialApp(
+      theme: Theme.of(context),
+      localizationsDelegates: const [
+        GlobalShadLocalizations.delegate,
+        DefaultMaterialLocalizations.delegate,
+        DefaultWidgetsLocalizations.delegate,
+      ],
+      builder: (context, child) => ShadAppBuilder(child: child!),
+      home: Scaffold(body: child),
+    ),
   );
-  await tester.tap(find.byKey(const ValueKey('authContinueButton')));
-  await tester.pumpAndSettle();
 }
+
+class FakeMeals extends MealsApiClient {
+  FakeMeals(this.meals) : super('', '');
+
+  List<SavedMeal> meals;
+
+  @override
+  Future<List<SavedMeal>> list() async => meals;
+
+  @override
+  Future<List<SavedMeal>> remove(String name) async => meals = [
+    for (final m in meals)
+      if (m.name != name) m,
+  ];
+
+  @override
+  Future<List<SavedMeal>> save(SavedMeal meal) async =>
+      meals = [...meals, meal];
+}
+
+const signedInSession =
+    '{"userId":"user_1","email":"mick@example.com","displayName":"Mick '
+    'Cunningham","provider":"apple","backendToken":"t","signedInAt":'
+    '"2026-11-06T08:00:00.000"}';
 
 Future<SculptusState> pumpScreen(
   WidgetTester tester,
@@ -34,17 +66,46 @@ Future<SculptusState> pumpScreen(
 }
 
 void main() {
-  testWidgets('Sculptus opens to the one-box Today screen', (tester) async {
+  testWidgets('signed out, Sculptus offers Apple and email sign in', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
-    await signInForTest(tester);
 
     expect(find.text('Sculptus'), findsOneWidget);
-    expect(find.text('What did you eat or do?'), findsOneWidget);
-    expect(find.text('left to eat'), findsOneWidget);
-    expect(find.byType(NavigationBar), findsNothing);
+    expect(find.byKey(const ValueKey('authEmailField')), findsOneWidget);
+    expect(find.byKey(const ValueKey('authPasswordField')), findsOneWidget);
+    expect(find.byKey(const ValueKey('authNameField')), findsNothing);
+    await tester.tap(find.text('New here? Create an account'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('authNameField')), findsOneWidget);
+    expect(find.text('Create account'), findsOneWidget);
+  });
+
+  testWidgets('signed in, Today opens and the avatar opens the profile', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1179, 2556);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    SharedPreferences.setMockInitialValues({
+      'sculptus_auth_v1': signedInSession,
+      'sculptus_ai_consent_v1': true,
+    });
+
+    await tester.pumpWidget(const SculptusApp());
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('todayLogField')), findsOneWidget);
+    expect(find.text('Log it'), findsOneWidget);
+    expect(find.text('MC'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('profileButton')));
+    await tester.pumpAndSettle();
+    expect(find.text('Profile'), findsOneWidget);
+    expect(find.text('Mick Cunningham'), findsOneWidget);
+    expect(find.text('Signed in with Apple'), findsOneWidget);
   });
 
   test('a parsed log becomes food, burn, steps and weight', () async {
@@ -172,47 +233,94 @@ void main() {
       assumption: '',
     );
     await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: ConsideringPanel(
-            options: const [option],
-            balance: 768,
-            hasMaintenance: true,
-            onAte: (food) => ate = food,
-          ),
+      shadHarness(
+        ConsideringPanel(
+          options: const [option],
+          balance: 768,
+          hasMaintenance: true,
+          onAte: (food) => ate = food,
         ),
       ),
     );
 
-    expect(find.text('If you add...'), findsOneWidget);
     expect(find.text('+170 · 30g protein · deficit 598'), findsOneWidget);
     await tester.tap(find.text('Ate it'));
     expect(ate, option);
   });
 
   testWidgets('My meals lists saved meals and forgets one', (tester) async {
-    var meals = [
+    final client = FakeMeals([
       const SavedMeal(name: 'Mexican bowl', calories: 640, proteinGrams: 48),
       const SavedMeal(name: 'Earth Bowl', calories: 720, proteinGrams: 35),
-    ];
+    ]);
     await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: MyMealsDialog(
-            load: () async => meals,
-            remove: (name) async =>
-                meals = [for (final m in meals) if (m.name != name) m],
-          ),
-        ),
-      ),
+      shadHarness(MyMealsCard(auth: AuthController(), client: client)),
     );
     await tester.pumpAndSettle();
 
     expect(find.text('640 kcal · 48g protein'), findsOneWidget);
-    await tester.tap(find.byTooltip('Forget Mexican bowl'));
+    await tester.tap(find.text('Mexican bowl'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Forget this meal'));
     await tester.pumpAndSettle();
     expect(find.text('Mexican bowl'), findsNothing);
     expect(find.text('Earth Bowl'), findsOneWidget);
+  });
+
+  test('a pasted WOD estimate replaces the WHOOP burn for that day', () async {
+    SharedPreferences.setMockInitialValues({});
+    final state = SculptusState();
+    await state.load();
+    final day = DateTime(2026, 11, 6);
+    await state.addActivity(
+      ActivityEntry(
+        id: 'whoop-2026-11-06',
+        date: day,
+        name: 'WHOOP workouts (2)',
+        caloriesBurned: 410,
+        createdAt: day,
+      ),
+    );
+    expect(state.activityBurnFor(day), 410);
+
+    await state.applyLog(
+      LoggedDay.fromJson({
+        'workouts': [
+          {
+            'name': 'CrossFit WOD',
+            'caloriesBurned': 0,
+            'estimatedCaloriesBurned': 330,
+            'minutes': 19,
+            'details': '5 rounds: 400m run, 15 thrusters @ 95 lb; 18:40',
+          },
+        ],
+      }),
+      day,
+    );
+
+    expect(state.activityBurnFor(day), 330);
+    final whoop = state
+        .activitiesFor(day)
+        .firstWhere((entry) => entry.id.startsWith('whoop-'));
+    expect(state.isActivityOverridden(whoop), isTrue);
+  });
+
+  test('weigh-ins give a 7-day average, weekly change and series', () async {
+    SharedPreferences.setMockInitialValues({});
+    final state = SculptusState();
+    await state.load();
+    final today = DateTime(2026, 11, 14);
+    for (var i = 0; i < 14; i++) {
+      await state.setWeight(DateTime(2026, 11, 1 + i), 205 - i * 0.2);
+    }
+    await state.setWeight(today, 202.0);
+
+    expect(state.weights.where((w) => _sameDay(w.date, today)).length, 1);
+    expect(state.weightTrendFor(today), closeTo(202.94, 0.01));
+    expect(state.weeklyWeightChange(today), closeTo(-1.46, 0.01));
+    final series = state.weightSeries(today, 30);
+    expect(series.length, 14);
+    expect(series.last.weight, 202.0);
   });
 
   testWidgets('Gauge screen still shows the daily prompts', (tester) async {
@@ -363,3 +471,6 @@ one spring roll and one fried dumpling
     expect(find.text('Food estimate'), findsOneWidget);
   });
 }
+
+bool _sameDay(DateTime a, DateTime b) =>
+    a.year == b.year && a.month == b.month && a.day == b.day;

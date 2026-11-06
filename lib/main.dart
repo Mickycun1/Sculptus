@@ -6,9 +6,15 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:shadcn_ui/shadcn_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:url_launcher/url_launcher.dart';
+
+part 'ui/auth_screen.dart';
+part 'ui/kit.dart';
+part 'ui/profile_screen.dart';
+part 'ui/today_screen.dart';
 
 void main() {
   runApp(const SculptusApp());
@@ -16,7 +22,6 @@ void main() {
 
 const _romanRed = Color(0xFF7A2738);
 const _bronze = Color(0xFFC08A3E);
-const _marble = Color(0xFFF4EFE5);
 const _parchment = Color(0xFFFFFBF1);
 const _olive = Color(0xFF536443);
 const _ink = Color(0xFF25201C);
@@ -1085,17 +1090,24 @@ class LoggedWorkout {
     required this.name,
     required this.caloriesBurned,
     required this.minutes,
+    this.estimatedCaloriesBurned = 0,
+    this.details = '',
   });
 
   final String name;
   final int caloriesBurned;
   final int minutes;
+  final int estimatedCaloriesBurned;
+  final String details;
 
   factory LoggedWorkout.fromJson(Map<String, dynamic> json) {
     return LoggedWorkout(
       name: json['name'] as String? ?? 'Workout',
       caloriesBurned: (json['caloriesBurned'] as num?)?.round() ?? 0,
       minutes: (json['minutes'] as num?)?.round() ?? 0,
+      estimatedCaloriesBurned:
+          (json['estimatedCaloriesBurned'] as num?)?.round() ?? 0,
+      details: json['details'] as String? ?? '',
     );
   }
 }
@@ -1143,10 +1155,11 @@ class LogApiClient {
   final String baseUrl;
   final String token;
 
-  Future<LoggedDay> parse(String text) async {
-    final json = await AuthBackendClient(
-      baseUrl,
-    ).sendJson('POST', '/api/log', {'text': text}, token: token);
+  Future<LoggedDay> parse(String text, {double? bodyWeightLb}) async {
+    final json = await AuthBackendClient(baseUrl).sendJson('POST', '/api/log', {
+      'text': text,
+      'bodyWeightLb': ?bodyWeightLb,
+    }, token: token);
     return LoggedDay.fromJson(json);
   }
 }
@@ -1292,6 +1305,47 @@ class AuthBackendClient {
     return _sessionFromResponse(json, 'apple');
   }
 
+  Future<AuthSession> signInWithPassword({
+    required String email,
+    required String password,
+  }) async {
+    final json = await _postJson('/api/auth/login', {
+      'email': email,
+      'password': password,
+    });
+    return _sessionFromResponse(json, 'password');
+  }
+
+  Future<AuthSession> signUpWithPassword({
+    required String email,
+    required String password,
+    required String displayName,
+  }) async {
+    final json = await _postJson('/api/auth/signup', {
+      'email': email,
+      'password': password,
+      'displayName': displayName,
+    });
+    return _sessionFromResponse(json, 'password');
+  }
+
+  Future<void> requestPasswordReset(String email) async {
+    await sendJson('POST', '/api/auth/password/forgot', {'email': email});
+  }
+
+  Future<AuthSession> resetPassword({
+    required String email,
+    required String code,
+    required String password,
+  }) async {
+    final json = await _postJson('/api/auth/password/reset', {
+      'email': email,
+      'code': code,
+      'password': password,
+    });
+    return _sessionFromResponse(json, 'password');
+  }
+
   Future<void> deleteAccount(String token) async {
     await sendJson('DELETE', '/api/account', const {}, token: token);
   }
@@ -1343,7 +1397,9 @@ class AuthBackendClient {
       if (token.trim().isNotEmpty) {
         request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $token');
       }
-      request.write(jsonEncode(body));
+      if (method != 'GET') {
+        request.write(jsonEncode(body));
+      }
       final response = await request.close().timeout(
         const Duration(seconds: 90),
       );
@@ -1455,6 +1511,65 @@ class AuthController extends ChangeNotifier {
       );
       await _save();
     });
+  }
+
+  Future<void> signInWithPassword(String email, String password) async {
+    await _runAuthAction(() async {
+      session = await AuthBackendClient(authBackendUrl).signInWithPassword(
+        email: email.trim().toLowerCase(),
+        password: password,
+      );
+      await _save();
+    });
+  }
+
+  Future<void> signUpWithPassword({
+    required String name,
+    required String email,
+    required String password,
+  }) async {
+    await _runAuthAction(() async {
+      session = await AuthBackendClient(authBackendUrl).signUpWithPassword(
+        email: email.trim().toLowerCase(),
+        password: password,
+        displayName: name.trim(),
+      );
+      await _save();
+    });
+  }
+
+  Future<bool> requestPasswordReset(String email) async {
+    var sent = false;
+    await _runAuthAction(() async {
+      await AuthBackendClient(
+        authBackendUrl,
+      ).requestPasswordReset(email.trim().toLowerCase());
+      sent = true;
+    });
+    return sent;
+  }
+
+  Future<void> resetPassword({
+    required String email,
+    required String code,
+    required String password,
+  }) async {
+    await _runAuthAction(() async {
+      session = await AuthBackendClient(authBackendUrl).resetPassword(
+        email: email.trim().toLowerCase(),
+        code: code.trim(),
+        password: password,
+      );
+      await _save();
+    });
+  }
+
+  void clearError() {
+    if (errorMessage.isEmpty) {
+      return;
+    }
+    errorMessage = '';
+    notifyListeners();
   }
 
   Future<bool> deleteAccount() async {
@@ -1954,9 +2069,52 @@ class SculptusState extends ChangeNotifier {
   }
 
   int activityBurnFor(DateTime date) {
-    return activitiesFor(
-      date,
-    ).fold<int>(0, (sum, entry) => sum + entry.caloriesBurned);
+    return activitiesFor(date)
+        .where((entry) => !isActivityOverridden(entry))
+        .fold<int>(0, (sum, entry) => sum + entry.caloriesBurned);
+  }
+
+  bool isActivityOverridden(ActivityEntry entry) {
+    if (!entry.id.startsWith('whoop-')) {
+      return false;
+    }
+    final key = _dateKey(entry.date);
+    return activities.any((item) => item.id.startsWith('wod-$key'));
+  }
+
+  List<({DateTime date, double weight, double average})> weightSeries(
+    DateTime end,
+    int days,
+  ) {
+    final last = _dateOnly(end);
+    final first = DateTime(last.year, last.month, last.day - days + 1);
+    return [
+      for (final entry in weights)
+        if (!_dateOnly(entry.date).isBefore(first) &&
+            !_dateOnly(entry.date).isAfter(last))
+          (
+            date: _dateOnly(entry.date),
+            weight: entry.weight,
+            average: weightTrendFor(entry.date) ?? entry.weight,
+          ),
+    ]..sort((a, b) => a.date.compareTo(b.date));
+  }
+
+  double? weeklyWeightChange(DateTime date) {
+    final now = weightTrendFor(date);
+    final before = weightTrendFor(
+      DateTime(date.year, date.month, date.day - 7),
+    );
+    if (now == null || before == null) {
+      return null;
+    }
+    return now - before;
+  }
+
+  Future<void> setWeight(DateTime date, double weight) {
+    return addWeight(
+      WeightEntry(id: _newId('weight'), date: _dateOnly(date), weight: weight),
+    );
   }
 
   List<StepEntry> stepEntriesFor(DateTime date) {
@@ -1980,6 +2138,13 @@ class SculptusState extends ChangeNotifier {
 
   int totalBurnFor(DateTime date) {
     return activityBurnFor(date) + stepBurnFor(date);
+  }
+
+  int balanceFor(DateTime date) {
+    final maintenance = maintenanceFor(date);
+    return maintenance == null
+        ? remainingFoodBudgetFor(date)
+        : maintenance - consumedFor(date).calories;
   }
 
   int remainingFoodBudgetFor(DateTime date) {
@@ -2028,7 +2193,7 @@ class SculptusState extends ChangeNotifier {
 
   double? weightTrendFor(DateTime date) {
     final end = _dateOnly(date);
-    final start = end.subtract(const Duration(days: 6));
+    final start = DateTime(end.year, end.month, end.day - 6);
     final recent = weights.where((entry) {
       final day = _dateOnly(entry.date);
       return !day.isBefore(start) && !day.isAfter(end);
@@ -2064,6 +2229,24 @@ class SculptusState extends ChangeNotifier {
             range,
             food.assumption,
           ].where((part) => part.trim().isNotEmpty).join(' · '),
+        ),
+      );
+    }
+
+    for (final workout in log.workouts) {
+      if (workout.caloriesBurned > 0 || workout.estimatedCaloriesBurned <= 0) {
+        continue;
+      }
+      activities.removeWhere((entry) => entry.id.startsWith('wod-$key'));
+      activities.add(
+        ActivityEntry(
+          id: 'wod-$key-${_newId('w')}',
+          date: day,
+          name: workout.name,
+          caloriesBurned: workout.estimatedCaloriesBurned,
+          minutes: workout.minutes,
+          notes: workout.details,
+          createdAt: now,
         ),
       );
     }
@@ -2416,97 +2599,35 @@ class _SculptusAppState extends State<SculptusApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Sculptus',
-      debugShowCheckedModeBanner: false,
-      theme: _buildTheme(),
-      home: AnimatedBuilder(
-        animation: Listenable.merge([state, auth]),
-        builder: (context, _) {
-          if (!state.isLoaded || !auth.isLoaded) {
-            return const LoadingScreen();
-          }
-          if (!auth.isSignedIn) {
-            return AuthScreen(auth: auth);
-          }
-          return HomeShell(state: state, auth: auth);
-        },
+    return ShadApp.custom(
+      theme: sculptusTheme(Brightness.light),
+      darkTheme: sculptusTheme(Brightness.dark),
+      themeMode: ThemeMode.system,
+      appBuilder: (context) => MaterialApp(
+        title: 'Sculptus',
+        debugShowCheckedModeBanner: false,
+        theme: Theme.of(context),
+        localizationsDelegates: const [
+          GlobalShadLocalizations.delegate,
+          DefaultMaterialLocalizations.delegate,
+          DefaultWidgetsLocalizations.delegate,
+        ],
+        builder: (context, child) => ShadAppBuilder(child: child!),
+        home: AnimatedBuilder(
+          animation: Listenable.merge([state, auth]),
+          builder: (context, _) {
+            if (!state.isLoaded || !auth.isLoaded) {
+              return const LoadingScreen();
+            }
+            if (!auth.isSignedIn) {
+              return AuthScreen(auth: auth);
+            }
+            return HomeShell(state: state, auth: auth);
+          },
+        ),
       ),
     );
   }
-}
-
-ThemeData _buildTheme() {
-  final colorScheme =
-      ColorScheme.fromSeed(
-        seedColor: _romanRed,
-        brightness: Brightness.light,
-      ).copyWith(
-        primary: _romanRed,
-        secondary: _bronze,
-        tertiary: _olive,
-        surface: _parchment,
-        onSurface: _ink,
-      );
-
-  return ThemeData(
-    useMaterial3: true,
-    colorScheme: colorScheme,
-    scaffoldBackgroundColor: _marble,
-    fontFamily: 'Avenir',
-    appBarTheme: const AppBarTheme(
-      backgroundColor: _romanRed,
-      foregroundColor: Colors.white,
-      centerTitle: false,
-      elevation: 0,
-    ),
-    navigationBarTheme: NavigationBarThemeData(
-      backgroundColor: _parchment,
-      indicatorColor: _bronze,
-      labelTextStyle: WidgetStateProperty.resolveWith(
-        (states) => TextStyle(
-          color: states.contains(WidgetState.selected) ? _ink : _blue,
-          fontWeight: states.contains(WidgetState.selected)
-              ? FontWeight.w800
-              : FontWeight.w600,
-          fontSize: 12,
-        ),
-      ),
-    ),
-    inputDecorationTheme: InputDecorationTheme(
-      filled: true,
-      fillColor: Colors.white,
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: const BorderSide(color: _stone),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: const BorderSide(color: _stone),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: const BorderSide(color: _romanRed, width: 1.4),
-      ),
-    ),
-    filledButtonTheme: FilledButtonThemeData(
-      style: FilledButton.styleFrom(
-        backgroundColor: _romanRed,
-        foregroundColor: Colors.white,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      ),
-    ),
-    outlinedButtonTheme: OutlinedButtonThemeData(
-      style: OutlinedButton.styleFrom(
-        foregroundColor: _romanRed,
-        side: const BorderSide(color: _romanRed),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      ),
-    ),
-    iconButtonTheme: IconButtonThemeData(
-      style: IconButton.styleFrom(foregroundColor: _romanRed),
-    ),
-  );
 }
 
 class LoadingScreen extends StatelessWidget {
@@ -2514,946 +2635,13 @@ class LoadingScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(child: CircularProgressIndicator(color: _romanRed)),
-    );
-  }
-}
-
-class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key, required this.auth});
-
-  final AuthController auth;
-
-  @override
-  State<AuthScreen> createState() => _AuthScreenState();
-}
-
-class _AuthScreenState extends State<AuthScreen> {
-  final email = TextEditingController();
-  final displayName = TextEditingController();
-
-  @override
-  void dispose() {
-    email.dispose();
-    displayName.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(18),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 460),
-              child: Panel(
-                padding: 18,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Container(
-                          width: 46,
-                          height: 46,
-                          decoration: BoxDecoration(
-                            color: _romanRed,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Icon(
-                            Icons.account_balance,
-                            color: Colors.white,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            'Sculptus',
-                            style: Theme.of(context).textTheme.headlineSmall
-                                ?.copyWith(
-                                  color: _ink,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 18),
-                    SizedBox(
-                      height: 48,
-                      child: SignInWithAppleButton(
-                        onPressed: widget.auth.isBusy
-                            ? () {}
-                            : widget.auth.signInWithApple,
-                      ),
-                    ),
-                    if (widget.auth.showGoogleSignIn) ...[
-                      const SizedBox(height: 10),
-                      FilledButton.icon(
-                        onPressed: widget.auth.isBusy
-                            ? null
-                            : widget.auth.signInWithGoogle,
-                        icon: const Icon(Icons.g_mobiledata),
-                        label: const Text('Continue with Google'),
-                      ),
-                    ],
-                    if (widget.auth.showLocalSignIn) ...[
-                      const SizedBox(height: 16),
-                      TextField(
-                        key: const ValueKey('authEmailField'),
-                        controller: email,
-                        keyboardType: TextInputType.emailAddress,
-                        textInputAction: TextInputAction.next,
-                        decoration: const InputDecoration(labelText: 'Email'),
-                      ),
-                      const SizedBox(height: 10),
-                      TextField(
-                        controller: displayName,
-                        textInputAction: TextInputAction.done,
-                        decoration: const InputDecoration(labelText: 'Name'),
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          key: const ValueKey('authContinueButton'),
-                          onPressed: widget.auth.isBusy
-                              ? null
-                              : () => widget.auth.signInWithLocal(
-                                  email: email.text,
-                                  displayName: displayName.text,
-                                ),
-                          icon: const Icon(Icons.login),
-                          label: const Text('Continue'),
-                        ),
-                      ),
-                    ],
-                    if (widget.auth.errorMessage.isNotEmpty) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        widget.auth.errorMessage,
-                        style: const TextStyle(
-                          color: _romanRed,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ],
-                    if (widget.auth.showLocalSignIn) ...[
-                      const SizedBox(height: 12),
-                      TextButton.icon(
-                        onPressed: widget.auth.isBusy
-                            ? null
-                            : () => _showAuthBackendDialog(context),
-                        icon: const Icon(Icons.settings),
-                        label: const Text('Backend'),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
-          ),
+      backgroundColor: ShadTheme.of(context).colorScheme.background,
+      body: Center(
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(22),
+          child: Image.asset('assets/icon.png', width: 88, height: 88),
         ),
-      ),
-    );
-  }
-
-  Future<void> _showAuthBackendDialog(BuildContext context) async {
-    final controller = TextEditingController(text: widget.auth.authBackendUrl);
-    final nextUrl = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Auth Backend'),
-        content: TextField(
-          controller: controller,
-          keyboardType: TextInputType.url,
-          decoration: const InputDecoration(labelText: 'Backend URL'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    if (nextUrl != null) {
-      await widget.auth.updateBackendUrl(nextUrl);
-    }
-  }
-}
-
-class HomeShell extends StatefulWidget {
-  const HomeShell({super.key, required this.state, required this.auth});
-
-  final SculptusState state;
-  final AuthController auth;
-
-  @override
-  State<HomeShell> createState() => _HomeShellState();
-}
-
-class _HomeShellState extends State<HomeShell> {
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Row(
-          children: [
-            Icon(Icons.account_balance, size: 22),
-            SizedBox(width: 10),
-            Text(
-              'Sculptus',
-              style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0),
-            ),
-          ],
-        ),
-        actions: [
-          PopupMenuButton<String>(
-            tooltip: 'Account',
-            icon: const Icon(Icons.account_circle),
-            onSelected: _onMenuSelected,
-            itemBuilder: (context) => [
-              PopupMenuItem(
-                enabled: false,
-                child: Text(widget.auth.session?.shortName ?? 'Signed in'),
-              ),
-              const PopupMenuDivider(),
-              const PopupMenuItem(value: 'my_meals', child: Text('My meals')),
-              const PopupMenuItem(
-                value: 'connect_whoop',
-                child: Text('Connect WHOOP'),
-              ),
-              const PopupMenuItem(
-                value: 'privacy_policy',
-                child: Text('Privacy policy'),
-              ),
-              const PopupMenuItem(value: 'sign_out', child: Text('Sign out')),
-              const PopupMenuItem(
-                value: 'delete_account',
-                child: Text('Delete account'),
-              ),
-            ],
-          ),
-        ],
-      ),
-      body: SafeArea(
-        child: TodayScreen(state: widget.state, auth: widget.auth),
-      ),
-    );
-  }
-
-  Future<void> _onMenuSelected(String value) async {
-    switch (value) {
-      case 'my_meals':
-        final meals = MealsApiClient(
-          widget.auth.authBackendUrl,
-          widget.auth.session?.backendToken ?? '',
-        );
-        await showDialog<void>(
-          context: context,
-          builder: (context) =>
-              MyMealsDialog(load: meals.list, remove: meals.remove),
-        );
-      case 'connect_whoop':
-        await _connectWhoop();
-      case 'privacy_policy':
-        await launchUrl(
-          Uri.parse('https://dynafex.ai/sculptus_privacy_policy.html'),
-          mode: LaunchMode.externalApplication,
-        );
-      case 'sign_out':
-        await widget.auth.signOut();
-      case 'delete_account':
-        await _confirmDeleteAccount();
-    }
-  }
-
-  Future<void> _connectWhoop() async {
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final url = await WhoopApiClient(
-        widget.state.whoopBackendUrl,
-        token: widget.auth.session?.backendToken ?? '',
-      ).authorizationUrl();
-      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-    } catch (error) {
-      messenger.showSnackBar(SnackBar(content: Text(error.toString())));
-    }
-  }
-
-  Future<void> _confirmDeleteAccount() async {
-    final messenger = ScaffoldMessenger.of(context);
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete account?'),
-        content: const Text(
-          'This permanently deletes your Sculptus account, disconnects WHOOP, '
-          'and erases everything logged on this phone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) {
-      return;
-    }
-    if (await widget.auth.deleteAccount()) {
-      await widget.state.clearAll();
-    } else {
-      messenger.showSnackBar(SnackBar(content: Text(widget.auth.errorMessage)));
-    }
-  }
-}
-
-class TodayScreen extends StatefulWidget {
-  const TodayScreen({super.key, required this.state, required this.auth});
-
-  final SculptusState state;
-  final AuthController auth;
-
-  @override
-  State<TodayScreen> createState() => _TodayScreenState();
-}
-
-class _TodayScreenState extends State<TodayScreen> {
-  final logText = TextEditingController();
-  bool isLogging = false;
-  String errorMessage = '';
-  String question = '';
-  List<LoggedFood> considering = const [];
-
-  DateTime get today => _dateOnly(DateTime.now());
-  String get token => widget.auth.session?.backendToken ?? '';
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.state.whoop.connected) {
-      _syncWhoop();
-    }
-  }
-
-  @override
-  void dispose() {
-    logText.dispose();
-    super.dispose();
-  }
-
-  Future<void> _syncWhoop() async {
-    try {
-      final snapshot = await WhoopApiClient(
-        widget.state.whoopBackendUrl,
-        token: token,
-      ).fetchSummary(today);
-      await widget.state.applyWhoopSnapshot(snapshot);
-    } on WhoopSyncException {
-      // Today still works from what was typed; WHOOP fills in when reachable.
-    }
-  }
-
-  Future<bool> _ensureAiConsent() async {
-    const consentKey = 'sculptus_ai_consent_v1';
-    final prefs = await SharedPreferences.getInstance();
-    if (prefs.getBool(consentKey) ?? false) {
-      return true;
-    }
-    if (!mounted) {
-      return false;
-    }
-    final agreed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('How logging works'),
-        content: const Text(
-          'Sculptus sends what you type here to Anthropic\'s Claude AI to '
-          'estimate calories, protein, workouts, steps and weight. Anthropic '
-          'does not use it to train its models. Nothing else from your '
-          'account is sent.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Not now'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Agree'),
-          ),
-        ],
-      ),
-    );
-    if (agreed != true) {
-      return false;
-    }
-    await prefs.setBool(consentKey, true);
-    return true;
-  }
-
-  Future<void> _editProfile() async {
-    final goals = widget.state.goals;
-    final age = TextEditingController(
-      text: goals.age > 0 ? '${goals.age}' : '',
-    );
-    final feet = TextEditingController(
-      text: goals.heightInches > 0 ? '${goals.heightInches ~/ 12}' : '',
-    );
-    final inches = TextEditingController(
-      text: goals.heightInches > 0
-          ? _formatNumber(goals.heightInches % 12)
-          : '',
-    );
-    var sex = goals.sex;
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('About you'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                key: const ValueKey('profileAge'),
-                controller: age,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Age'),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('profileFeet'),
-                      controller: feet,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(labelText: 'Feet'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('profileInches'),
-                      controller: inches,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(labelText: 'Inches'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'male', label: Text('Male')),
-                  ButtonSegment(value: 'female', label: Text('Female')),
-                ],
-                selected: {sex},
-                onSelectionChanged: (value) =>
-                    setDialogState(() => sex = value.first),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Save'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (saved == true) {
-      await widget.state.updateGoals(
-        goals.copyWith(
-          age: _readInt(age.text),
-          heightInches: _readInt(feet.text) * 12 + _readDouble(inches.text),
-          sex: sex,
-        ),
-      );
-    }
-    age.dispose();
-    feet.dispose();
-    inches.dispose();
-  }
-
-  Future<void> _rememberMeal(DiaryEntry entry) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final name = TextEditingController(text: entry.name);
-    final calories = TextEditingController(
-      text: '${entry.nutrition.calories}',
-    );
-    final protein = TextEditingController(
-      text: _formatNumber(entry.nutrition.protein.roundToDouble()),
-    );
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Remember this meal'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Give it the name you type and its real numbers. Sculptus will '
-              'use them whenever you mention it.',
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              key: const ValueKey('mealName'),
-              controller: name,
-              decoration: const InputDecoration(labelText: 'Name'),
-            ),
-            TextField(
-              key: const ValueKey('mealCalories'),
-              controller: calories,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Calories'),
-            ),
-            TextField(
-              key: const ValueKey('mealProtein'),
-              controller: protein,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'Protein (g)'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
-    );
-    final meal = SavedMeal(
-      name: name.text.trim(),
-      calories: _readInt(calories.text),
-      proteinGrams: _readDouble(protein.text),
-    );
-    name.dispose();
-    calories.dispose();
-    protein.dispose();
-    if (saved != true || meal.name.isEmpty) {
-      return;
-    }
-    try {
-      await MealsApiClient(widget.auth.authBackendUrl, token).save(meal);
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            'Saved. ${meal.name} will count as ${meal.calories} kcal.',
-          ),
-        ),
-      );
-    } catch (error) {
-      messenger.showSnackBar(SnackBar(content: Text(error.toString())));
-    }
-  }
-
-  Future<void> _submit() async {
-    final text = logText.text.trim();
-    if (text.isEmpty || isLogging) {
-      return;
-    }
-    FocusScope.of(context).unfocus();
-    if (!await _ensureAiConsent()) {
-      return;
-    }
-    setState(() {
-      isLogging = true;
-      errorMessage = '';
-    });
-    try {
-      final log = await LogApiClient(
-        widget.auth.authBackendUrl,
-        token,
-      ).parse(text);
-      await widget.state.applyLog(log, today);
-      logText.clear();
-      setState(() {
-        question = log.question ?? '';
-        considering = log.considering;
-      });
-    } catch (error) {
-      setState(() {
-        errorMessage = error.toString();
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          isLogging = false;
-        });
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = widget.state;
-    final eaten = state.consumedFor(today);
-    final burned = state.totalBurnFor(today);
-    final remaining = state.remainingFoodBudgetFor(today);
-    final maintenance = state.maintenanceFor(today);
-    final balance = maintenance == null
-        ? remaining
-        : maintenance - eaten.calories;
-    final foods = state.entriesFor(today);
-    final workouts = state.activitiesFor(today);
-    final steps = state.stepsFor(today);
-    final textTheme = Theme.of(context).textTheme;
-
-    return RefreshIndicator(
-      onRefresh: _syncWhoop,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 24),
-        children: [
-          Text(
-            _displayDate(today),
-            style: const TextStyle(color: _blue, fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: 12),
-          Panel(
-            padding: 18,
-            child: Column(
-              children: [
-                Text(
-                  '${balance.abs()}',
-                  style: textTheme.displayMedium?.copyWith(
-                    color: balance >= 0 ? _ink : _romanRed,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                Text(
-                  maintenance == null
-                      ? (balance >= 0 ? 'left to eat' : 'over')
-                      : (balance >= 0 ? 'calorie deficit' : 'calorie surplus'),
-                  style: const TextStyle(
-                    color: _blue,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  maintenance == null
-                      ? 'eaten ${eaten.calories} · burned $burned'
-                            '${steps > 0 ? ' · $steps steps' : ''}'
-                      : 'eaten ${eaten.calories} of ~$maintenance burned'
-                            '${steps > 0 ? ' · $steps steps' : ''}',
-                  style: const TextStyle(
-                    color: _ink,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                if (eaten.protein > 0)
-                  Text(
-                    '${_formatNumber(eaten.protein.roundToDouble())}g protein',
-                    style: const TextStyle(color: _olive),
-                  ),
-              ],
-            ),
-          ),
-          if (!state.hasProfile) ...[
-            const SizedBox(height: 8),
-            OutlinedButton.icon(
-              key: const ValueKey('todayProfileButton'),
-              onPressed: _editProfile,
-              icon: const Icon(Icons.person),
-              label: const Text('Add age and height to see your deficit'),
-            ),
-          ],
-          const SizedBox(height: 12),
-          TodayWeightLine(state: state, today: today),
-          const SizedBox(height: 12),
-          TextField(
-            key: const ValueKey('todayLogField'),
-            controller: logText,
-            minLines: 2,
-            maxLines: 8,
-            textInputAction: TextInputAction.newline,
-            decoration: InputDecoration(
-              hintText: 'What did you eat or do?',
-              suffixIcon: isLogging
-                  ? const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    )
-                  : IconButton(
-                      key: const ValueKey('todayLogSend'),
-                      tooltip: 'Log it',
-                      onPressed: _submit,
-                      icon: const Icon(Icons.send),
-                    ),
-            ),
-          ),
-          if (errorMessage.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Text(
-              errorMessage,
-              style: const TextStyle(
-                color: _romanRed,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-          ],
-          if (question.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            Panel(
-              child: Row(
-                children: [
-                  const Icon(Icons.help_outline, color: _bronze),
-                  const SizedBox(width: 10),
-                  Expanded(child: Text(question)),
-                  IconButton(
-                    tooltip: 'Dismiss',
-                    onPressed: () => setState(() => question = ''),
-                    icon: const Icon(Icons.close),
-                  ),
-                ],
-              ),
-            ),
-          ],
-          if (considering.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            ConsideringPanel(
-              options: considering,
-              balance: balance,
-              hasMaintenance: maintenance != null,
-              onAte: (food) async {
-                setState(() {
-                  considering = [
-                    for (final option in considering)
-                      if (option != food) option,
-                  ];
-                });
-                await state.applyLog(LoggedDay(foods: [food]), today);
-              },
-            ),
-          ],
-          const SizedBox(height: 12),
-          for (final workout in workouts)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.local_fire_department, color: _bronze),
-              title: Text(workout.name),
-              trailing: Text('-${workout.caloriesBurned}'),
-            ),
-          for (final entry in foods)
-            Dismissible(
-              key: ValueKey(entry.id),
-              direction: DismissDirection.endToStart,
-              onDismissed: (_) => state.deleteEntry(entry.id),
-              background: Container(
-                alignment: Alignment.centerRight,
-                padding: const EdgeInsets.only(right: 16),
-                color: _romanRed,
-                child: const Icon(Icons.delete, color: Colors.white),
-              ),
-              child: ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(entry.name),
-                subtitle: entry.notes.isEmpty ? null : Text(entry.notes),
-                trailing: Text('${entry.nutrition.calories}'),
-                onLongPress: () => _rememberMeal(entry),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class MyMealsDialog extends StatefulWidget {
-  const MyMealsDialog({super.key, required this.load, required this.remove});
-
-  final Future<List<SavedMeal>> Function() load;
-  final Future<List<SavedMeal>> Function(String name) remove;
-
-  @override
-  State<MyMealsDialog> createState() => _MyMealsDialogState();
-}
-
-class _MyMealsDialogState extends State<MyMealsDialog> {
-  List<SavedMeal>? meals;
-  String errorMessage = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _run(widget.load);
-  }
-
-  Future<void> _run(Future<List<SavedMeal>> Function() action) async {
-    try {
-      final result = await action();
-      if (mounted) {
-        setState(() => meals = result);
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(() => errorMessage = error.toString());
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final meals = this.meals;
-    return AlertDialog(
-      title: const Text('My meals'),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: errorMessage.isNotEmpty
-            ? Text(errorMessage)
-            : meals == null
-            ? const Center(child: CircularProgressIndicator())
-            : meals.isEmpty
-            ? const Text(
-                'Long-press any food on Today to remember it with its real '
-                'numbers.',
-              )
-            : ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final meal in meals)
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(meal.name),
-                      subtitle: Text(
-                        '${meal.calories} kcal · '
-                        '${_formatNumber(meal.proteinGrams.roundToDouble())}g protein',
-                      ),
-                      trailing: IconButton(
-                        tooltip: 'Forget ${meal.name}',
-                        onPressed: () => _run(() => widget.remove(meal.name)),
-                        icon: const Icon(Icons.delete_outline),
-                      ),
-                    ),
-                ],
-              ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Done'),
-        ),
-      ],
-    );
-  }
-}
-
-class ConsideringPanel extends StatelessWidget {
-  const ConsideringPanel({
-    super.key,
-    required this.options,
-    required this.balance,
-    required this.hasMaintenance,
-    required this.onAte,
-  });
-
-  final List<LoggedFood> options;
-  final int balance;
-  final bool hasMaintenance;
-  final ValueChanged<LoggedFood> onAte;
-
-  @override
-  Widget build(BuildContext context) {
-    return Panel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'If you add...',
-            style: TextStyle(color: _blue, fontWeight: FontWeight.w800),
-          ),
-          for (final food in options)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(food.name),
-              subtitle: Text(_afterText(food)),
-              trailing: TextButton(
-                onPressed: () => onAte(food),
-                child: const Text('Ate it'),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  String _afterText(LoggedFood food) {
-    final after = balance - food.calories;
-    final protein = food.proteinGrams > 0
-        ? ' · ${_formatNumber(food.proteinGrams.roundToDouble())}g protein'
-        : '';
-    final label = hasMaintenance
-        ? (after >= 0 ? 'deficit ${after.abs()}' : 'surplus ${after.abs()}')
-        : (after >= 0 ? '${after.abs()} left' : '${after.abs()} over');
-    return '+${food.calories}$protein · $label';
-  }
-}
-
-class TodayWeightLine extends StatelessWidget {
-  const TodayWeightLine({super.key, required this.state, required this.today});
-
-  final SculptusState state;
-  final DateTime today;
-
-  @override
-  Widget build(BuildContext context) {
-    final trend = state.weightTrendFor(today);
-    if (trend == null) {
-      return const Text(
-        'Add a morning weigh-in to your log ("weighed 202") to see your trend.',
-        style: TextStyle(color: _blue),
-      );
-    }
-    final latest = state.latestWeight;
-    final isToday = latest != null && _dateKey(latest.date) == _dateKey(today);
-    final gap = isToday ? latest.weight - trend : 0.0;
-    return Panel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Weight ${trend.toStringAsFixed(1)} lb (7-day average)',
-            style: const TextStyle(color: _ink, fontWeight: FontWeight.w900),
-          ),
-          if (gap.abs() >= 1.5)
-            Text(
-              'Scale said ${_formatNumber(latest!.weight)} today. Daily '
-              'swings like that are mostly water and food; the average is '
-              'what counts.',
-              style: const TextStyle(color: _blue),
-            ),
-        ],
       ),
     );
   }

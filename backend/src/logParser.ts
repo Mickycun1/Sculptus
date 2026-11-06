@@ -19,7 +19,9 @@ const DayLogSchema = z.object({
     z.object({
       name: z.string(),
       caloriesBurned: z.number().int(),
-      minutes: z.number().int()
+      estimatedCaloriesBurned: z.number().int(),
+      minutes: z.number().int(),
+      details: z.string()
     })
   ),
   steps: z.number().int().nullable(),
@@ -43,7 +45,10 @@ Considering:
 - Foods the person has not eaten yet but is weighing up ("if I have popcorn", "thinking about yogurt and whey", "should I have...") go in considering, never in foods. Use the same fields as foods. Group items they would eat together into one entry ("200g Greek yogurt + 1/2 scoop whey"). Empty when nothing is being considered.
 
 Activity:
-- workouts holds only calorie burns the person reports (watch, WHOOP, machine). Never estimate a burn yourself; if a workout is described without a number, record caloriesBurned as 0.
+- workouts: caloriesBurned is only a burn the person reports (watch, WHOOP, machine), otherwise 0.
+- estimatedCaloriesBurned: when the person describes the actual work (a pasted WOD, movements, loads, reps, rounds, distances, time cap or finish time), estimate the calories that work burned for their body weight, counting only working time plus a modest allowance for warm-up and rest. Be conservative: wrist trackers often over-read strength and gymnastics work. If the work is not described in enough detail to estimate, use 0.
+- details is a one-line summary of the work done ("5 rounds: 400m run, 15 thrusters @ 95 lb; 18:40"), or an empty string.
+- minutes is the duration if stated or clear from the workout, otherwise 0.
 - steps is the step count if mentioned ("12k steps" is 12000), otherwise null.
 - weightLb is a morning weigh-in in pounds if mentioned (convert kg), otherwise null.
 
@@ -60,9 +65,17 @@ export class LogParser {
     this.client = new Anthropic({ apiKey });
   }
 
-  async parse(text: string, savedMeals: SavedMeal[] = []): Promise<DayLog> {
-    const content = savedMeals.length
-      ? `Saved meals:\n${JSON.stringify(savedMeals)}\n\nLog:\n${text}`
+  async parse(
+    text: string,
+    savedMeals: SavedMeal[] = [],
+    bodyWeightLb: number | null = null
+  ): Promise<DayLog> {
+    const context = [
+      bodyWeightLb ? `Body weight: ${bodyWeightLb} lb` : "",
+      savedMeals.length ? `Saved meals:\n${JSON.stringify(savedMeals)}` : ""
+    ].filter(Boolean);
+    const content = context.length
+      ? `${context.join("\n\n")}\n\nLog:\n${text}`
       : text;
     const response = await this.client.beta.messages.parse({
       model: "claude-opus-5-5",

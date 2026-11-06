@@ -6,11 +6,14 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { type AppUser, createAuthStore } from "./authStore.js";
 import { assertWhoopConfig, config } from "./config.js";
 import { LogParser } from "./logParser.js";
+import { Mailer } from "./mailer.js";
+import { createPasswordStore } from "./passwordStore.js";
 import { createMealStore } from "./mealStore.js";
 import { createTokenStore } from "./tokenStore.js";
 import { WhoopClient } from "./whoopClient.js";
 
 const app = express();
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json());
 
@@ -19,6 +22,31 @@ const authStore = await createAuthStore(config.mongoUri, config.mongoDbName);
 const tokenStore = await createTokenStore(config.mongoUri, config.mongoDbName);
 const whoop = new WhoopClient(tokenStore);
 const mealStore = await createMealStore(config.mongoUri, config.mongoDbName);
+const passwordStore = await createPasswordStore(config.mongoUri, config.mongoDbName);
+const mailer = new Mailer(config.resendApiKey, config.mailFrom);
+const attempts = new Map<string, { count: number; resetAt: number }>();
+
+function tooManyAttempts(key: string, limit: number, windowMinutes: number) {
+  const now = Date.now();
+  const entry = attempts.get(key);
+  if (!entry || entry.resetAt < now) {
+    attempts.set(key, { count: 1, resetAt: now + windowMinutes * 60 * 1000 });
+    return false;
+  }
+  entry.count += 1;
+  return entry.count > limit;
+}
+
+function readEmail(request: express.Request) {
+  const email = String(request.body?.email ?? "").trim().toLowerCase();
+  return email.includes("@") && email.length <= 254 ? email : "";
+}
+
+function readPassword(request: express.Request) {
+  return String(request.body?.password ?? "");
+}
+
+const passwordRule = "Use at least 8 characters for your password.";
 const googleClient = new OAuth2Client(config.googleWebClientId || undefined);
 const appleKeys = createRemoteJWKSet(
   new URL("https://appleid.apple.com/auth/keys")
@@ -169,6 +197,111 @@ app.post("/api/auth/local", async (request, response) => {
   }
 });
 
+app.post("/api/auth/signup", async (request, response) => {
+  try {
+    const email = readEmail(request);
+    const password = readPassword(request);
+    if (!email) {
+      response.status(400).json({ error: "Enter a valid email." });
+      return;
+    }
+    if (password.length < 8 || password.length > 200) {
+      response.status(400).json({ error: passwordRule });
+      return;
+    }
+    if (tooManyAttempts(`signup:${request.ip}`, 10, 60)) {
+      response.status(429).json({ error: "Too many attempts. Try again later." });
+      return;
+    }
+    if (await passwordStore.exists(email)) {
+      response.status(409).json({ error: "That email already has an account. Sign in instead." });
+      return;
+    }
+    await passwordStore.set(email, password);
+    const displayName = String(request.body?.displayName ?? "").trim().slice(0, 80);
+    const user = await authStore.upsertUser({
+      provider: "password",
+      providerSubject: email,
+      email,
+      displayName: displayName || email
+    });
+    const session = await authStore.createSession(user.id, config.authSessionDays);
+    response.json({ user, session });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/auth/login", async (request, response) => {
+  try {
+    const email = readEmail(request);
+    const password = readPassword(request);
+    if (!email || !password) {
+      response.status(400).json({ error: "Enter your email and password." });
+      return;
+    }
+    if (tooManyAttempts(`login:${email}`, 10, 15)) {
+      response.status(429).json({ error: "Too many attempts. Try again in 15 minutes." });
+      return;
+    }
+    const user = await authStore.findUser("password", email);
+    if (!(await passwordStore.verify(email, password)) || !user) {
+      response.status(401).json({ error: "That email and password don't match." });
+      return;
+    }
+    attempts.delete(`login:${email}`);
+    const session = await authStore.createSession(user.id, config.authSessionDays);
+    response.json({ user, session });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/auth/password/forgot", async (request, response) => {
+  try {
+    const email = readEmail(request);
+    if (!email) {
+      response.status(400).json({ error: "Enter a valid email." });
+      return;
+    }
+    if (!mailer.configured) {
+      response.status(503).json({ error: "Password reset is not available yet." });
+      return;
+    }
+    if (!tooManyAttempts(`forgot:${email}`, 3, 60)) {
+      const code = await passwordStore.startReset(email);
+      if (code) {
+        await mailer.sendResetCode(email, code);
+      }
+    }
+    response.status(204).send();
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/auth/password/reset", async (request, response) => {
+  try {
+    const email = readEmail(request);
+    const code = String(request.body?.code ?? "");
+    const password = readPassword(request);
+    if (password.length < 8 || password.length > 200) {
+      response.status(400).json({ error: passwordRule });
+      return;
+    }
+    const user = email ? await authStore.findUser("password", email) : null;
+    if (!user || !(await passwordStore.finishReset(email, code, password))) {
+      response.status(400).json({ error: "That code is wrong or has expired." });
+      return;
+    }
+    await authStore.clearUserSessions(user.id);
+    const session = await authStore.createSession(user.id, config.authSessionDays);
+    response.json({ user, session });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
 app.get("/api/auth/me", async (request, response) => {
   try {
     const token = bearerToken(request);
@@ -211,6 +344,9 @@ app.delete("/api/account", async (request, response) => {
       // Deleting the account must not depend on WHOOP being reachable.
     }
     await mealStore.removeAll(user.id);
+    if (user.provider === "password") {
+      await passwordStore.remove(user.providerSubject);
+    }
     await authStore.deleteUser(user.id);
     response.status(204).send();
   } catch (error) {
@@ -233,7 +369,16 @@ app.post("/api/log", async (request, response) => {
       response.status(400).json({ error: "That log is too long." });
       return;
     }
-    response.json(await logParser.parse(text, await mealStore.list(user.id)));
+    const bodyWeight = Number(request.body?.bodyWeightLb);
+    response.json(
+      await logParser.parse(
+        text,
+        await mealStore.list(user.id),
+        Number.isFinite(bodyWeight) && bodyWeight > 50 && bodyWeight < 700
+          ? Math.round(bodyWeight)
+          : null
+      )
+    );
   } catch (error) {
     handleError(error, response);
   }

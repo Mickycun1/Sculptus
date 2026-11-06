@@ -3,7 +3,7 @@ import { Collection, MongoClient } from "mongodb";
 
 export type AppUser = {
   id: string;
-  provider: "google" | "apple" | "local";
+  provider: "google" | "apple" | "local" | "password";
   providerSubject: string;
   email: string;
   displayName: string;
@@ -20,7 +20,7 @@ export type AppSession = {
 };
 
 export type AuthProfile = {
-  provider: "google" | "apple" | "local";
+  provider: "google" | "apple" | "local" | "password";
   providerSubject: string;
   email: string;
   displayName: string;
@@ -33,6 +33,8 @@ export interface AuthStore {
   getUserForSession(token: string): Promise<AppUser | null>;
   clearSession(token: string): Promise<void>;
   deleteUser(userId: string): Promise<void>;
+  findUser(provider: AppUser["provider"], providerSubject: string): Promise<AppUser | null>;
+  clearUserSessions(userId: string): Promise<void>;
 }
 
 function nowIso() {
@@ -96,6 +98,18 @@ export class MemoryAuthStore implements AuthStore {
 
   async clearSession(token: string) {
     this.sessions.delete(token);
+  }
+
+  async findUser(provider: AppUser["provider"], providerSubject: string) {
+    return this.users.get(`${provider}:${providerSubject}`) ?? null;
+  }
+
+  async clearUserSessions(userId: string) {
+    for (const [token, session] of this.sessions) {
+      if (session.userId === userId) {
+        this.sessions.delete(token);
+      }
+    }
   }
 
   async deleteUser(userId: string) {
@@ -163,6 +177,14 @@ class MongoAuthStore implements AuthStore {
 
   async clearSession(token: string) {
     await this.sessions.deleteOne({ token });
+  }
+
+  async findUser(provider: AppUser["provider"], providerSubject: string) {
+    return this.users.findOne({ provider, providerSubject });
+  }
+
+  async clearUserSessions(userId: string) {
+    await this.sessions.deleteMany({ userId });
   }
 
   async deleteUser(userId: string) {
