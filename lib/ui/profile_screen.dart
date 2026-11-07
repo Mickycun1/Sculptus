@@ -1104,6 +1104,24 @@ class AccountCard extends StatelessWidget {
   final SculptusState state;
   final AuthController auth;
 
+  Future<void> _manageSubscription(BuildContext context) async {
+    final sonner = ShadSonner.of(context);
+    try {
+      final json = await AuthBackendClient(auth.authBackendUrl).sendJson(
+        'POST',
+        '/api/billing/portal',
+        const {},
+        token: auth.session?.backendToken ?? '',
+      );
+      await launchUrl(
+        Uri.parse(json['url'] as String),
+        mode: LaunchMode.externalApplication,
+      );
+    } catch (error) {
+      sonner.show(ShadToast(description: Text('$error')));
+    }
+  }
+
   Future<void> _delete(BuildContext context) async {
     final navigator = Navigator.of(context);
     final sonner = ShadSonner.of(context);
@@ -1157,6 +1175,16 @@ class AccountCard extends StatelessWidget {
               Uri.parse('https://dynafex.ai/sculptus_privacy_policy.html'),
               mode: LaunchMode.externalApplication,
             ),
+          ),
+          ListRow(
+            leading: const IconBubble(LucideIcons.creditCard),
+            title: 'Manage subscription',
+            trailing: Icon(
+              LucideIcons.externalLink,
+              size: 16,
+              color: theme.colorScheme.mutedForeground,
+            ),
+            onTap: () => _manageSubscription(context),
           ),
           ListRow(
             leading: const IconBubble(LucideIcons.logOut),

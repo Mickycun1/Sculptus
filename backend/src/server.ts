@@ -10,12 +10,30 @@ import { Mailer } from "./mailer.js";
 import { createPasswordStore } from "./passwordStore.js";
 import { createMealStore } from "./mealStore.js";
 import { costOf, createUsageStore } from "./usageStore.js";
+import { Billing, createBillingStore } from "./billing.js";
+import { SubscriptionChecker } from "./subscription.js";
 import { createTokenStore } from "./tokenStore.js";
 import { WhoopClient } from "./whoopClient.js";
 
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
+app.post(
+  "/api/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  async (request, response) => {
+    try {
+      await billing.handleWebhook(
+        request.body as Buffer,
+        String(request.headers["stripe-signature"] ?? "")
+      );
+      response.json({ received: true });
+    } catch (error) {
+      console.error("stripe webhook failed", error);
+      response.status(400).json({ error: "Invalid webhook." });
+    }
+  }
+);
 app.use(express.json({ limit: "12mb" }));
 
 const oauthStates = new Map<string, { userId: string; expiresAt: number }>();
@@ -76,6 +94,25 @@ const appleKeys = createRemoteJWKSet(
   new URL("https://appleid.apple.com/auth/keys")
 );
 const usageStore = await createUsageStore(config.mongoUri, config.mongoDbName);
+const billing = new Billing(
+  config.stripeSecretKey,
+  config.stripePriceId,
+  config.stripeWebhookSecret,
+  config.publicUrl,
+  await createBillingStore(config.mongoUri, config.mongoDbName)
+);
+const subscriptions = new SubscriptionChecker(
+  billing,
+  new Set(config.subscriptionExemptUserIds)
+);
+
+async function requireSubscription(user: AppUser, response: express.Response) {
+  if (await subscriptions.isActive(user.id)) {
+    return true;
+  }
+  response.status(402).json({ error: "Your Sculptus subscription isn't active." });
+  return false;
+}
 const logParser = new LogParser(config.anthropicApiKey, (usage, userId) => {
   const record = { ...usage, userId, costUsd: costOf(usage.model, usage), at: new Date() };
   console.log(JSON.stringify({ event: "ai_usage", ...record }));
@@ -395,6 +432,11 @@ app.delete("/api/account", async (request, response) => {
     }
     await mealStore.removeAll(user.id);
     await usageStore.removeAll(user.id);
+    try {
+      await billing.cancelFor(user.id);
+    } catch (error) {
+      console.error("stripe cancel failed during account deletion", user.id, error);
+    }
     if (user.provider === "password") {
       await passwordStore.remove(user.providerSubject);
     }
@@ -409,6 +451,9 @@ app.post("/api/log", async (request, response) => {
   try {
     const user = await requireUser(request, response);
     if (!user) {
+      return;
+    }
+    if (!(await requireSubscription(user, response))) {
       return;
     }
     const text = String(request.body?.text ?? "").trim();
@@ -442,10 +487,65 @@ app.post("/api/log", async (request, response) => {
   }
 });
 
+app.get("/api/subscription", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    response.json(await subscriptions.status(user.id));
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/billing/checkout", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    response.json({ url: await billing.checkoutUrl(user.id, user.email) });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/billing/portal", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    response.json({ url: await billing.portalUrl(user.id) });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.get("/billing/done", (request, response) => {
+  const status = String(request.query.status ?? "");
+  const message =
+    status === "success"
+      ? "You're subscribed. Thank you!"
+      : status === "cancelled"
+        ? "No charge was made."
+        : "All set.";
+  response.type("html").send(`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sculptus</title></head>
+<body style="font-family:-apple-system,system-ui,sans-serif;text-align:center;padding:72px 24px;background:#f7f6f4;color:#1c1917">
+<h1 style="font-size:24px">${message}</h1>
+<p style="color:#78716c">Head back to Sculptus to keep logging.</p>
+<a href="sculptus://billing" style="display:inline-block;margin-top:16px;padding:14px 28px;border-radius:14px;background:#7A2738;color:#fff;text-decoration:none;font-weight:600">Open Sculptus</a>
+</body></html>`);
+});
+
 app.post("/api/meals/estimate", async (request, response) => {
   try {
     const user = await requireUser(request, response);
     if (!user) {
+      return;
+    }
+    if (!(await requireSubscription(user, response))) {
       return;
     }
     const name = String(request.body?.name ?? "").trim().slice(0, 80);

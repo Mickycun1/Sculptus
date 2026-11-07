@@ -475,6 +475,30 @@ void main() {
     expect(state.latestWeight?.weight, 204.3);
   });
 
+  testWidgets('the paywall shows the price, renewal terms and restore', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1179, 2556);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    final subscription = SubscriptionController(enabledOverride: true);
+    await tester.pumpWidget(
+      shadHarness(
+        PaywallScreen(subscription: subscription, auth: AuthController()),
+      ),
+    );
+
+    expect(find.text('\$4.99 a month'), findsOneWidget);
+    expect(find.text('Subscribe with card'), findsOneWidget);
+    expect(find.text('Check my subscription'), findsOneWidget);
+    expect(find.textContaining('renews monthly'), findsOneWidget);
+  });
+
+  test('the app stays unlocked until the server enforces payment', () {
+    expect(SubscriptionController().unlocked, isTrue);
+    expect(SubscriptionController(enabledOverride: true).unlocked, isFalse);
+  });
+
   testWidgets('a meal-prep batch is split into portions', (tester) async {
     tester.view.physicalSize = const Size(1179, 2556);
     tester.view.devicePixelRatio = 3;

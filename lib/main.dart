@@ -15,6 +15,7 @@ import 'package:url_launcher/url_launcher.dart';
 part 'ui/auth_screen.dart';
 part 'ui/kit.dart';
 part 'ui/onboarding.dart';
+part 'ui/paywall.dart';
 part 'ui/profile_screen.dart';
 part 'ui/today_screen.dart';
 
@@ -2866,6 +2867,7 @@ class SculptusApp extends StatefulWidget {
 class _SculptusAppState extends State<SculptusApp> {
   final SculptusState state = SculptusState();
   final AuthController auth = AuthController();
+  final SubscriptionController subscription = SubscriptionController();
   bool setupSkipped = false;
 
   @override
@@ -2879,6 +2881,7 @@ class _SculptusAppState extends State<SculptusApp> {
   void dispose() {
     state.dispose();
     auth.dispose();
+    subscription.dispose();
     super.dispose();
   }
 
@@ -2903,12 +2906,17 @@ class _SculptusAppState extends State<SculptusApp> {
           child: ShadAppBuilder(child: child!),
         ),
         home: AnimatedBuilder(
-          animation: Listenable.merge([state, auth]),
+          animation: Listenable.merge([state, auth, subscription]),
           builder: (context, _) {
             if (!state.isLoaded || !auth.isLoaded) {
               return const LoadingScreen();
             }
             if (!auth.isSignedIn) {
+              if (subscription.loaded) {
+                WidgetsBinding.instance.addPostFrameCallback(
+                  (_) => subscription.reset(),
+                );
+              }
               return WelcomeScreen(auth: auth);
             }
             if (!state.hasProfile && !setupSkipped) {
@@ -2917,6 +2925,15 @@ class _SculptusAppState extends State<SculptusApp> {
                 auth: auth,
                 onDone: () => setState(() => setupSkipped = true),
               );
+            }
+            if (!subscription.loaded) {
+              WidgetsBinding.instance.addPostFrameCallback(
+                (_) => subscription.start(auth),
+              );
+              return const LoadingScreen();
+            }
+            if (!subscription.unlocked) {
+              return PaywallScreen(subscription: subscription, auth: auth);
             }
             return HomeShell(state: state, auth: auth);
           },

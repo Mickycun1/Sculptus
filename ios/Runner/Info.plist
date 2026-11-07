@@ -45,6 +45,17 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>ai.dynafex.sculptus</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>sculptus</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Take a photo of the whiteboard or a food label to add it to your log.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

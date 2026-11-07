@@ -9,6 +9,15 @@ export const config = {
   appleBundleId: process.env.APPLE_BUNDLE_ID ?? "ai.dynafex.sculptus",
   anthropicApiKey: process.env.ANTHROPIC_API_KEY ?? "",
   resendApiKey: process.env.RESEND_API_KEY ?? "",
+  stripeSecretKey: process.env.STRIPE_SECRET_KEY ?? "",
+  stripePriceId: process.env.STRIPE_PRICE_ID ?? "",
+  stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? "",
+  publicUrl:
+    process.env.PUBLIC_URL ?? "https://sculptus-backend-oae5ydvgvq-ue.a.run.app",
+  subscriptionExemptUserIds: (process.env.SUBSCRIPTION_EXEMPT_USER_IDS ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean),
   mailFrom: process.env.MAIL_FROM ?? "Sculptus <no-reply@dynafex.ai>",
   authSessionDays: Number(process.env.AUTH_SESSION_DAYS ?? 30),
   allowLocalAuth: process.env.SCULPTUS_ALLOW_LOCAL_AUTH !== "false",
