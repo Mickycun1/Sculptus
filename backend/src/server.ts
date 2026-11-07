@@ -5,7 +5,7 @@ import { OAuth2Client } from "google-auth-library";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { type AppUser, createAuthStore } from "./authStore.js";
 import { assertWhoopConfig, config } from "./config.js";
-import { LogParser } from "./logParser.js";
+import { type LogImage, LogParser } from "./logParser.js";
 import { Mailer } from "./mailer.js";
 import { createPasswordStore } from "./passwordStore.js";
 import { createMealStore } from "./mealStore.js";
@@ -15,7 +15,7 @@ import { WhoopClient } from "./whoopClient.js";
 const app = express();
 app.set("trust proxy", 1);
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "12mb" }));
 
 const oauthStates = new Map<string, { userId: string; expiresAt: number }>();
 const authStore = await createAuthStore(config.mongoUri, config.mongoDbName);
@@ -47,6 +47,29 @@ function readPassword(request: express.Request) {
 }
 
 const passwordRule = "Use at least 8 characters for your password.";
+
+function readImages(value: unknown): LogImage[] | null {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value) || value.length > 3) {
+    return null;
+  }
+  const images: LogImage[] = [];
+  for (const item of value) {
+    const mediaType = String(item?.mediaType ?? "");
+    const data = String(item?.data ?? "");
+    if (
+      !["image/jpeg", "image/png", "image/webp"].includes(mediaType) ||
+      !data ||
+      data.length > 4_000_000
+    ) {
+      return null;
+    }
+    images.push({ mediaType: mediaType as LogImage["mediaType"], data });
+  }
+  return images;
+}
 const googleClient = new OAuth2Client(config.googleWebClientId || undefined);
 const appleKeys = createRemoteJWKSet(
   new URL("https://appleid.apple.com/auth/keys")
@@ -148,11 +171,15 @@ app.post("/api/auth/apple", async (request, response) => {
         ? payload.email
         : String(request.body?.email ?? "");
     const displayName = String(request.body?.displayName ?? "").trim();
+    const existing = await authStore.findUser("apple", payload.sub);
     const user = await authStore.upsertUser({
       provider: "apple",
       providerSubject: payload.sub,
-      email,
-      displayName: displayName || email || "Sculptus athlete"
+      email: email || existing?.email || "",
+      displayName:
+        displayName ||
+        (existing?.displayName.includes("@") ? "" : existing?.displayName) ||
+        "Sculptus athlete"
     });
     const session = await authStore.createSession(
       user.id,
@@ -332,6 +359,23 @@ app.post("/api/auth/logout", async (request, response) => {
   }
 });
 
+app.patch("/api/account", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    const displayName = String(request.body?.displayName ?? "").trim().slice(0, 80);
+    if (!displayName) {
+      response.status(400).json({ error: "Enter your name." });
+      return;
+    }
+    response.json({ user: await authStore.updateDisplayName(user.id, displayName) });
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
 app.delete("/api/account", async (request, response) => {
   try {
     const user = await requireUser(request, response);
@@ -361,7 +405,12 @@ app.post("/api/log", async (request, response) => {
       return;
     }
     const text = String(request.body?.text ?? "").trim();
-    if (!text) {
+    const images = readImages(request.body?.images);
+    if (images === null) {
+      response.status(400).json({ error: "Attach up to 3 JPEG or PNG photos." });
+      return;
+    }
+    if (!text && images.length === 0) {
       response.status(400).json({ error: "Tell me what you ate or did." });
       return;
     }
@@ -376,9 +425,29 @@ app.post("/api/log", async (request, response) => {
         await mealStore.list(user.id),
         Number.isFinite(bodyWeight) && bodyWeight > 50 && bodyWeight < 700
           ? Math.round(bodyWeight)
-          : null
+          : null,
+        images
       )
     );
+  } catch (error) {
+    handleError(error, response);
+  }
+});
+
+app.post("/api/meals/estimate", async (request, response) => {
+  try {
+    const user = await requireUser(request, response);
+    if (!user) {
+      return;
+    }
+    const name = String(request.body?.name ?? "").trim().slice(0, 80);
+    const ingredients = String(request.body?.ingredients ?? "").trim();
+    if (!ingredients || ingredients.length > 4000) {
+      response.status(400).json({ error: "List what's in the meal." });
+      return;
+    }
+    const portions = Math.min(Math.max(Math.round(Number(request.body?.portions) || 1), 1), 50);
+    response.json(await logParser.estimateMeal(name, ingredients, portions));
   } catch (error) {
     handleError(error, response);
   }
@@ -413,10 +482,13 @@ app.put("/api/meals", async (request, response) => {
       response.status(400).json({ error: "You can save up to 100 meals." });
       return;
     }
+    const portions = Math.min(Math.max(Math.round(Number(request.body?.portions) || 1), 1), 50);
     await mealStore.save(user.id, {
       name,
       calories,
-      proteinGrams: Number.isFinite(proteinGrams) ? Math.max(0, proteinGrams) : 0
+      proteinGrams: Number.isFinite(proteinGrams) ? Math.max(0, proteinGrams) : 0,
+      ingredients: String(request.body?.ingredients ?? "").trim().slice(0, 4000),
+      portions
     });
     response.json({ meals: await mealStore.list(user.id) });
   } catch (error) {

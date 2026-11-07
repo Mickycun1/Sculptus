@@ -4,6 +4,8 @@ export type SavedMeal = {
   name: string;
   calories: number;
   proteinGrams: number;
+  ingredients?: string;
+  portions?: number;
 };
 
 export interface MealStore {
@@ -45,7 +47,9 @@ class MongoMealStore implements MealStore {
     return docs.map((doc) => ({
       name: doc.name as string,
       calories: doc.calories as number,
-      proteinGrams: doc.proteinGrams as number
+      proteinGrams: doc.proteinGrams as number,
+      ingredients: (doc.ingredients as string | undefined) ?? "",
+      portions: (doc.portions as number | undefined) ?? 1
     }));
   }
 

@@ -18,6 +18,7 @@ class ProfileScreen extends StatelessWidget {
           builder: (context, _) {
             final session = auth.session;
             return ListView(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 40),
               children: [
                 Row(
@@ -37,17 +38,33 @@ class ProfileScreen extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 14),
-                Text(
-                  session?.shortName ?? 'Athlete',
-                  textAlign: TextAlign.center,
-                  style: theme.textTheme.h3.copyWith(
-                    fontWeight: FontWeight.w800,
+                GestureDetector(
+                  key: const ValueKey('editNameButton'),
+                  onTap: () => showNameSheet(context, auth),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Flexible(
+                        child: Text(
+                          session?.shortName ?? 'Athlete',
+                          textAlign: TextAlign.center,
+                          style: theme.textTheme.h3.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Icon(
+                        LucideIcons.pencil,
+                        size: 16,
+                        color: theme.colorScheme.mutedForeground,
+                      ),
+                    ],
                   ),
                 ),
-                if ((session?.email ?? '').isNotEmpty &&
-                    session?.email != session?.shortName)
+                if (session != null && !session.hasPrivateEmail)
                   Text(
-                    session!.email,
+                    session.email,
                     textAlign: TextAlign.center,
                     style: theme.textTheme.muted,
                   ),
@@ -86,6 +103,39 @@ class ProfileScreen extends StatelessWidget {
   }
 }
 
+Future<void> showNameSheet(BuildContext context, AuthController auth) async {
+  final current = auth.session?.shortName ?? '';
+  final controller = TextEditingController(
+    text: current == 'Athlete' ? '' : current,
+  );
+  final name = await showShadSheet<String>(
+    context: context,
+    side: ShadSheetSide.bottom,
+    builder: (context) => ShadSheet(
+      title: const Text('Your name'),
+      actions: [
+        ShadButton(
+          onPressed: () => Navigator.of(context).pop(controller.text),
+          child: const Text('Save'),
+        ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: ShadInput(
+          key: const ValueKey('nameField'),
+          controller: controller,
+          autofocus: true,
+          placeholder: const Text('Your name'),
+        ),
+      ),
+    ),
+  );
+  controller.dispose();
+  if (name != null && name.trim().isNotEmpty) {
+    await auth.updateDisplayName(name);
+  }
+}
+
 class WeightCard extends StatelessWidget {
   const WeightCard({super.key, required this.state});
 
@@ -117,7 +167,7 @@ class WeightCard extends StatelessWidget {
                   children: [
                     Text(
                       trend == null ? 'No weigh-ins' : trend.toStringAsFixed(1),
-                      style: theme.textTheme.h2.copyWith(
+                      style: theme.textTheme.h4.copyWith(
                         fontWeight: FontWeight.w800,
                       ),
                     ),
@@ -152,7 +202,7 @@ class WeightCard extends StatelessWidget {
           const SizedBox(height: 16),
           if (series.length >= 2)
             SizedBox(
-              height: 150,
+              height: 120,
               child: CustomPaint(
                 size: Size.infinite,
                 painter: WeightTrendPainter(
@@ -226,12 +276,8 @@ class WeightTrendPainter extends CustomPainter {
     final values = [
       for (final point in series) ...[point.weight, point.average],
     ];
-    var low = values.reduce(math.min) - 1;
-    var high = values.reduce(math.max) + 1;
-    if (goal != null && goal! > low - 6 && goal! < high + 6) {
-      low = math.min(low, goal! - 0.5);
-      high = math.max(high, goal! + 0.5);
-    }
+    final low = values.reduce(math.min) - 0.5;
+    final high = values.reduce(math.max) + 0.5;
     const left = 0.0;
     const right = 32.0;
     final width = size.width - left - right;
@@ -532,76 +578,13 @@ class _MyMealsCardState extends State<MyMealsCard> {
   }
 
   Future<void> _edit(SavedMeal meal) async {
-    final name = TextEditingController(text: meal.name);
-    final calories = TextEditingController(text: '${meal.calories}');
-    final protein = TextEditingController(
-      text: _formatNumber(meal.proteinGrams.roundToDouble()),
-    );
-    final action = await showShadSheet<String>(
-      context: context,
-      side: ShadSheetSide.bottom,
-      builder: (context) => ShadSheet(
-        title: Text(meal.name),
-        description: const Text('Sculptus uses these numbers exactly.'),
-        actions: [
-          ShadButton(
-            onPressed: () => Navigator.of(context).pop('save'),
-            child: const Text('Save'),
-          ),
-          ShadButton.ghost(
-            onPressed: () => Navigator.of(context).pop('delete'),
-            foregroundColor: ShadTheme.of(context).colorScheme.destructive,
-            leading: const Icon(LucideIcons.trash2, size: 16),
-            child: const Text('Forget this meal'),
-          ),
-        ],
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Column(
-            children: [
-              ShadInput(controller: name, placeholder: const Text('Name')),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: ShadInput(
-                      controller: calories,
-                      keyboardType: TextInputType.number,
-                      trailing: const Text('kcal'),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: ShadInput(
-                      controller: protein,
-                      keyboardType: TextInputType.number,
-                      trailing: const Text('g protein'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
+    final changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (context) => NewMealPage(client: client, existing: meal),
       ),
     );
-    final edited = SavedMeal(
-      name: name.text.trim(),
-      calories: _readInt(calories.text),
-      proteinGrams: _readDouble(protein.text),
-    );
-    name.dispose();
-    calories.dispose();
-    protein.dispose();
-    if (action == 'delete') {
-      await _run(() => client.remove(meal.name));
-    } else if (action == 'save' && edited.name.isNotEmpty) {
-      await _run(() async {
-        if (edited.name.toLowerCase() != meal.name.toLowerCase()) {
-          await client.remove(meal.name);
-        }
-        return client.save(edited);
-      });
+    if (changed == true) {
+      await _run(client.list);
     }
   }
 
@@ -609,6 +592,31 @@ class _MyMealsCardState extends State<MyMealsCard> {
   Widget build(BuildContext context) {
     final theme = ShadTheme.of(context);
     final meals = this.meals;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _list(theme, meals),
+        const SizedBox(height: 8),
+        ShadButton.outline(
+          key: const ValueKey('newMealButton'),
+          onPressed: _create,
+          leading: const Icon(LucideIcons.chefHat, size: 16),
+          child: const Text('New meal from ingredients'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _create() async {
+    final changed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (context) => NewMealPage(client: client)),
+    );
+    if (changed == true) {
+      await _run(client.list);
+    }
+  }
+
+  Widget _list(ShadThemeData theme, List<SavedMeal>? meals) {
     return ShadCard(
       padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
       child: errorMessage.isNotEmpty
@@ -630,8 +638,9 @@ class _MyMealsCardState extends State<MyMealsCard> {
           ? Padding(
               padding: const EdgeInsets.symmetric(vertical: 14),
               child: Text(
-                'Tap any food on Today and save it with its real numbers. '
-                'Sculptus will use them whenever you mention it.',
+                'Build a meal from its ingredients below, or tap any food on '
+                'Today to save it. Sculptus uses these numbers whenever you '
+                'mention the meal.',
                 style: theme.textTheme.muted.copyWith(fontSize: 13),
               ),
             )
@@ -653,6 +662,358 @@ class _MyMealsCardState extends State<MyMealsCard> {
                   ),
               ],
             ),
+    );
+  }
+}
+
+class NewMealPage extends StatefulWidget {
+  const NewMealPage({super.key, required this.client, this.existing});
+
+  final MealsApiClient client;
+  final SavedMeal? existing;
+
+  @override
+  State<NewMealPage> createState() => _NewMealPageState();
+}
+
+class _NewMealPageState extends State<NewMealPage> {
+  late final name = TextEditingController(text: widget.existing?.name ?? '');
+  late final ingredients = TextEditingController(
+    text: widget.existing?.ingredients ?? '',
+  );
+  late final calories = TextEditingController(
+    text: widget.existing == null ? '' : '${widget.existing!.calories}',
+  );
+  late final protein = TextEditingController(
+    text: widget.existing == null
+        ? ''
+        : _formatNumber(widget.existing!.proteinGrams.roundToDouble()),
+  );
+  late int portions = widget.existing?.portions ?? 1;
+  MealEstimate? estimate;
+  bool working = false;
+  bool saving = false;
+  String errorMessage = '';
+
+  bool get isEditing => widget.existing != null;
+
+  @override
+  void dispose() {
+    name.dispose();
+    ingredients.dispose();
+    calories.dispose();
+    protein.dispose();
+    super.dispose();
+  }
+
+  void _setPortions(int value) {
+    setState(() {
+      portions = value;
+      _fillFromEstimate();
+    });
+  }
+
+  void _fillFromEstimate() {
+    final estimate = this.estimate;
+    if (estimate == null) {
+      return;
+    }
+    calories.text = '${(estimate.calories / portions).round()}';
+    protein.text = '${(estimate.proteinGrams / portions).round()}';
+  }
+
+  Future<void> _calculate() async {
+    if (ingredients.text.trim().isEmpty) {
+      setState(() => errorMessage = 'List what goes in it first.');
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    setState(() {
+      working = true;
+      errorMessage = '';
+    });
+    try {
+      final result = await widget.client.estimate(
+        name.text.trim(),
+        ingredients.text.trim(),
+        portions: portions,
+      );
+      setState(() {
+        estimate = result;
+        if (name.text.trim().isEmpty) {
+          name.text = result.name;
+        }
+        _fillFromEstimate();
+      });
+    } catch (error) {
+      setState(() => errorMessage = error.toString());
+    } finally {
+      if (mounted) {
+        setState(() => working = false);
+      }
+    }
+  }
+
+  Future<void> _save() async {
+    final meal = SavedMeal(
+      name: name.text.trim(),
+      calories: _readInt(calories.text),
+      proteinGrams: _readDouble(protein.text),
+      ingredients: ingredients.text.trim(),
+      portions: portions,
+    );
+    if (meal.name.isEmpty || meal.calories <= 0) {
+      setState(
+        () => errorMessage = 'Give it a name and calories, or tap Work it out.',
+      );
+      return;
+    }
+    setState(() => saving = true);
+    try {
+      final old = widget.existing;
+      if (old != null && old.name.toLowerCase() != meal.name.toLowerCase()) {
+        await widget.client.remove(old.name);
+      }
+      await widget.client.save(meal);
+      if (mounted) {
+        Navigator.of(context).pop(true);
+      }
+    } catch (error) {
+      setState(() {
+        saving = false;
+        errorMessage = error.toString();
+      });
+    }
+  }
+
+  Future<void> _delete() async {
+    final old = widget.existing;
+    if (old == null) {
+      return;
+    }
+    await widget.client.remove(old.name);
+    if (mounted) {
+      Navigator.of(context).pop(true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = ShadTheme.of(context);
+    final estimate = this.estimate;
+    final label = theme.textTheme.small;
+    final hint = theme.textTheme.muted.copyWith(fontSize: 12);
+    return Scaffold(
+      backgroundColor: theme.colorScheme.background,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 16, 0),
+              child: Row(
+                children: [
+                  ShadIconButton.ghost(
+                    icon: const Icon(LucideIcons.chevronLeft),
+                    onPressed: () => Navigator.of(context).pop(false),
+                  ),
+                  Text(
+                    isEditing ? 'Edit meal' : 'New meal',
+                    style: theme.textTheme.large,
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                children: [
+                  Text('Name', style: label),
+                  const SizedBox(height: 6),
+                  ShadInput(
+                    key: const ValueKey('newMealName'),
+                    controller: name,
+                    placeholder: const Text('Mexican bowl'),
+                    textInputAction: TextInputAction.next,
+                  ),
+                  const SizedBox(height: 18),
+                  Text('What goes in it', style: label),
+                  Text(
+                    'Everything in the whole batch. Amounts help. Optional if '
+                    'you know the numbers.',
+                    style: hint,
+                  ),
+                  const SizedBox(height: 6),
+                  ShadTextarea(
+                    key: const ValueKey('newMealIngredients'),
+                    controller: ingredients,
+                    placeholder: const Text(
+                      '1.2kg chicken thigh\n600g white rice (dry)\n2 cans '
+                      'black beans\n1 jar salsa\n200g cheddar',
+                    ),
+                    minHeight: 130,
+                    maxHeight: 260,
+                    resizable: false,
+                  ),
+                  const SizedBox(height: 18),
+                  Text('How many portions does it make?', style: label),
+                  const SizedBox(height: 8),
+                  ShadCard(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 6,
+                    ),
+                    child: Row(
+                      children: [
+                        ShadIconButton.outline(
+                          key: const ValueKey('portionsMinus'),
+                          icon: const Icon(LucideIcons.minus),
+                          onPressed: portions > 1
+                              ? () => _setPortions(portions - 1)
+                              : null,
+                        ),
+                        Expanded(
+                          child: Column(
+                            children: [
+                              Text(
+                                '$portions',
+                                key: const ValueKey('portionsValue'),
+                                style: theme.textTheme.h3.copyWith(
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              Text(
+                                portions == 1 ? 'portion' : 'portions',
+                                style: hint,
+                              ),
+                            ],
+                          ),
+                        ),
+                        ShadIconButton.outline(
+                          key: const ValueKey('portionsPlus'),
+                          icon: const Icon(LucideIcons.plus),
+                          onPressed: portions < 50
+                              ? () => _setPortions(portions + 1)
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  ShadButton.secondary(
+                    key: const ValueKey('newMealCalculate'),
+                    onPressed: working ? null : _calculate,
+                    leading: working
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(LucideIcons.sparkles, size: 16),
+                    child: Text(working ? 'Working it out' : 'Work it out'),
+                  ),
+                  const SizedBox(height: 18),
+                  Text('Each portion', style: label),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ShadInput(
+                          key: const ValueKey('perPortionCalories'),
+                          controller: calories,
+                          keyboardType: TextInputType.number,
+                          placeholder: const Text('Calories'),
+                          trailing: const Text('kcal'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: ShadInput(
+                          key: const ValueKey('perPortionProtein'),
+                          controller: protein,
+                          keyboardType: TextInputType.number,
+                          placeholder: const Text('Protein'),
+                          trailing: const Text('g protein'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (errorMessage.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    ShadAlert.destructive(
+                      icon: const Icon(LucideIcons.info),
+                      description: Text(errorMessage),
+                    ),
+                  ],
+                  if (estimate != null) ...[
+                    const SizedBox(height: 14),
+                    ShadCard(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Whole batch ${_thousands(estimate.calories)} kcal · '
+                            '${estimate.proteinGrams.round()}g protein',
+                            style: theme.textTheme.small.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          for (final item in estimate.items)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 3),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      item.name,
+                                      style: theme.textTheme.small,
+                                    ),
+                                  ),
+                                  Text(
+                                    _thousands(item.calories),
+                                    style: hint.copyWith(fontSize: 13),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          if (estimate.assumption.isNotEmpty) ...[
+                            const SizedBox(height: 8),
+                            Text(estimate.assumption, style: hint),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                  if (isEditing) ...[
+                    const SizedBox(height: 18),
+                    ShadButton.ghost(
+                      onPressed: _delete,
+                      foregroundColor: theme.colorScheme.destructive,
+                      leading: const Icon(LucideIcons.trash2, size: 16),
+                      child: const Text('Delete this meal'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+              child: SizedBox(
+                width: double.infinity,
+                child: ShadButton(
+                  key: const ValueKey('newMealSave'),
+                  height: 50,
+                  onPressed: saving ? null : _save,
+                  leading: const Icon(LucideIcons.bookmarkPlus, size: 18),
+                  child: const Text('Save meal'),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

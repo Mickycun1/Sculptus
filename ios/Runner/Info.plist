@@ -45,6 +45,10 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Take a photo of the whiteboard or a food label to add it to your log.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Choose a screenshot of your workout or a food label to add it to your log.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

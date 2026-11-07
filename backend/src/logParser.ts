@@ -31,6 +31,35 @@ const DayLogSchema = z.object({
 
 export type DayLog = z.infer<typeof DayLogSchema>;
 
+const MealEstimateSchema = z.object({
+  name: z.string(),
+  calories: z.number().int(),
+  proteinGrams: z.number(),
+  items: z.array(
+    z.object({
+      name: z.string(),
+      calories: z.number().int(),
+      proteinGrams: z.number()
+    })
+  ),
+  assumption: z.string()
+});
+
+export type MealEstimate = z.infer<typeof MealEstimateSchema>;
+
+export type LogImage = {
+  mediaType: "image/jpeg" | "image/png" | "image/webp";
+  data: string;
+};
+
+const MEAL_PROMPT = `You estimate the nutrition of one meal a person makes regularly, from its name and ingredient list, for a calorie tracking app.
+
+- items: one entry per ingredient with the quantity folded into the name ("200g chicken thigh, cooked"), its calories and protein.
+- The list is a whole meal-prep batch. Every quantity is for the whole batch ("7 chicken breasts" means all 7). Never divide anything into servings: the app divides by the portion count itself.
+- items: each ingredient at its full listed quantity. calories and proteinGrams are the sum of all items, for the whole batch.
+- If quantities are missing, assume a typical home portion and say so briefly in assumption; otherwise assumption is an empty string.
+- name: the person's name for the meal if given, otherwise a short natural name.`;
+
 const SYSTEM_PROMPT = `You turn a person's casual daily log into structured nutrition and activity data for a calorie tracking app.
 
 Foods:
@@ -56,6 +85,8 @@ question: ask one short question only when a single item's uncertainty could mov
 
 Saved meals: the person may have saved meals with known numbers. When the log mentions one, even loosely ("my usual yogurt bowl"), use its calories and protein exactly, scaled for the portion ("half my Mexican bowl"), keep a tight range, and note "saved meal" in assumption. Only add on top of it for extras they mention.
 
+Photos: the person may attach photos, such as a photo of their plate or meal, a food label, a Wodify or gym app screenshot, or a whiteboard. Read them as part of the log. For a photo of food, identify each food, estimate the portion from the plate and anything in the picture for scale, log one entry per food with a wider range, and note the portion you assumed. For a workout photo, put the WOD in details and estimate the burn from the work and any result shown (time, rounds, loads). If no result is visible, assume they finished it as written at an average pace, say so in details, and ask for their time or loads in question.
+
 Ignore commentary, feelings, and anything that is not food, activity, or weight.`;
 
 export class LogParser {
@@ -68,15 +99,27 @@ export class LogParser {
   async parse(
     text: string,
     savedMeals: SavedMeal[] = [],
-    bodyWeightLb: number | null = null
+    bodyWeightLb: number | null = null,
+    images: LogImage[] = []
   ): Promise<DayLog> {
     const context = [
       bodyWeightLb ? `Body weight: ${bodyWeightLb} lb` : "",
       savedMeals.length ? `Saved meals:\n${JSON.stringify(savedMeals)}` : ""
     ].filter(Boolean);
-    const content = context.length
-      ? `${context.join("\n\n")}\n\nLog:\n${text}`
-      : text;
+    const prompt = context.length
+      ? `${context.join("\n\n")}\n\nLog:\n${text || "(see photos)"}`
+      : text || "(see photos)";
+    const content = [
+      ...images.map((image) => ({
+        type: "image" as const,
+        source: {
+          type: "base64" as const,
+          media_type: image.mediaType,
+          data: image.data
+        }
+      })),
+      { type: "text" as const, text: prompt }
+    ];
     const response = await this.client.beta.messages.parse({
       model: "claude-opus-5-5",
       max_tokens: 16000,
@@ -95,6 +138,34 @@ export class LogParser {
     }
     if (!response.parsed_output) {
       throw new Error("Could not read that log.");
+    }
+    return response.parsed_output;
+  }
+
+  async estimateMeal(
+    name: string,
+    ingredients: string,
+    portions = 1
+  ): Promise<MealEstimate> {
+    const response = await this.client.beta.messages.parse({
+      model: "claude-opus-5-5",
+      max_tokens: 8000,
+      betas: ["server-side-fallback-2026-07-01"],
+      fallbacks: "default",
+      output_config: {
+        effort: "medium",
+        format: betaZodOutputFormat(MealEstimateSchema)
+      },
+      system: MEAL_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content: `Meal name: ${name || "(none)"}\nThe batch makes ${portions} portion(s); return totals for the whole batch.\nIngredients:\n${ingredients}`
+        }
+      ]
+    });
+    if (!response.parsed_output) {
+      throw new Error("Could not work out that meal. Try listing amounts.");
     }
     return response.parsed_output;
   }

@@ -37,6 +37,7 @@ dependencies:
   sign_in_with_apple: ^7.0.1
   url_launcher: ^6.3.2
   shadcn_ui: ^0.57.4
+  image_picker: ^1.2.4
 
 dev_dependencies:
   flutter_test:

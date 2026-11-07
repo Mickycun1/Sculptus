@@ -35,6 +35,7 @@ export interface AuthStore {
   deleteUser(userId: string): Promise<void>;
   findUser(provider: AppUser["provider"], providerSubject: string): Promise<AppUser | null>;
   clearUserSessions(userId: string): Promise<void>;
+  updateDisplayName(userId: string, displayName: string): Promise<AppUser | null>;
 }
 
 function nowIso() {
@@ -102,6 +103,17 @@ export class MemoryAuthStore implements AuthStore {
 
   async findUser(provider: AppUser["provider"], providerSubject: string) {
     return this.users.get(`${provider}:${providerSubject}`) ?? null;
+  }
+
+  async updateDisplayName(userId: string, displayName: string) {
+    for (const [key, user] of this.users) {
+      if (user.id === userId) {
+        const updated = { ...user, displayName, updatedAt: nowIso() };
+        this.users.set(key, updated);
+        return updated;
+      }
+    }
+    return null;
   }
 
   async clearUserSessions(userId: string) {
@@ -185,6 +197,14 @@ class MongoAuthStore implements AuthStore {
 
   async clearUserSessions(userId: string) {
     await this.sessions.deleteMany({ userId });
+  }
+
+  async updateDisplayName(userId: string, displayName: string) {
+    await this.users.updateOne(
+      { id: userId },
+      { $set: { displayName, updatedAt: nowIso() } }
+    );
+    return this.users.findOne({ id: userId });
   }
 
   async deleteUser(userId: string) {

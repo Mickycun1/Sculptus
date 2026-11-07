@@ -37,6 +37,22 @@ class FakeMeals extends MealsApiClient {
   @override
   Future<List<SavedMeal>> save(SavedMeal meal) async =>
       meals = [...meals, meal];
+
+  @override
+  Future<MealEstimate> estimate(
+    String name,
+    String ingredients, {
+    int portions = 1,
+  }) async => const MealEstimate(
+    name: 'Burrito bowl',
+    calories: 4800,
+    proteinGrams: 360,
+    items: [
+      SavedMeal(name: '1.2kg chicken thigh', calories: 2400, proteinGrams: 300),
+      SavedMeal(name: '600g rice', calories: 2400, proteinGrams: 60),
+    ],
+    assumption: '',
+  );
 }
 
 const signedInSession =
@@ -261,7 +277,19 @@ void main() {
     expect(find.text('640 kcal · 48g protein'), findsOneWidget);
     await tester.tap(find.text('Mexican bowl'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Forget this meal'));
+    expect(find.text('Edit meal'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Delete this meal'),
+      300,
+      scrollable: find
+          .descendant(
+            of: find.byType(ListView).last,
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete this meal'));
     await tester.pumpAndSettle();
     expect(find.text('Mexican bowl'), findsNothing);
     expect(find.text('Earth Bowl'), findsOneWidget);
@@ -328,6 +356,58 @@ void main() {
 
     expect(state.activityBurnFor(day), 400);
     expect(state.activitiesFor(day).single.notes, contains('Tracker said 571'));
+  });
+
+  test('recent foods are de-duplicated, most frequent first', () async {
+    SharedPreferences.setMockInitialValues({});
+    final state = SculptusState();
+    await state.load();
+    LoggedDay food(String name, int calories) => LoggedDay(
+      foods: [
+        LoggedFood(
+          name: name,
+          calories: calories,
+          caloriesLow: 0,
+          caloriesHigh: 0,
+          proteinGrams: 10,
+          assumption: '',
+        ),
+      ],
+    );
+    await state.applyLog(food('Banana', 105), DateTime(2026, 11, 3));
+    await state.applyLog(food('Mexican bowl', 640), DateTime(2026, 11, 4));
+    await state.applyLog(food('mexican bowl', 640), DateTime(2026, 11, 5));
+    await state.applyLog(food('Apple', 95), DateTime(2026, 11, 6));
+
+    final recents = state.recentFoods(exclude: DateTime(2026, 11, 6));
+    expect(recents.map((e) => e.name.toLowerCase()), [
+      'mexican bowl',
+      'banana',
+    ]);
+  });
+
+  testWidgets('a meal-prep batch is split into portions', (tester) async {
+    tester.view.physicalSize = const Size(1179, 2556);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(shadHarness(NewMealPage(client: FakeMeals([]))));
+    await tester.enterText(
+      find.byKey(const ValueKey('newMealIngredients')),
+      '1.2kg chicken thigh, 600g rice',
+    );
+    for (var i = 0; i < 5; i++) {
+      await tester.tap(find.byKey(const ValueKey('portionsPlus')));
+    }
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('newMealCalculate')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('6'), findsOneWidget);
+    expect(find.text('800'), findsOneWidget);
+    expect(find.text('60'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('portionsMinus')));
+    await tester.pump();
+    expect(find.text('960'), findsOneWidget);
   });
 
   test('weigh-ins give a 7-day average, weekly change and series', () async {

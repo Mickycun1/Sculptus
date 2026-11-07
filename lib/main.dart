@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
@@ -745,8 +746,50 @@ class StepEntry {
   }
 }
 
+class WhoopWorkout {
+  const WhoopWorkout({
+    required this.name,
+    required this.calories,
+    this.minutes = 0,
+    this.strain = 0,
+    this.start,
+  });
+
+  final String name;
+  final int calories;
+  final int minutes;
+  final double strain;
+  final DateTime? start;
+
+  String get displayName {
+    final words = name
+        .split(RegExp(r'[-_\s]+'))
+        .where((word) => word.isNotEmpty)
+        .map((word) => word[0].toUpperCase() + word.substring(1))
+        .join(' ');
+    return words.isEmpty ? 'WHOOP workout' : words;
+  }
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'calories': calories,
+    'minutes': minutes,
+    'strain': strain,
+    'start': start?.toIso8601String(),
+  };
+
+  factory WhoopWorkout.fromJson(Map<String, dynamic> json) => WhoopWorkout(
+    name: json['name'] as String? ?? '',
+    calories: (json['calories'] as num?)?.round() ?? 0,
+    minutes: (json['minutes'] as num?)?.round() ?? 0,
+    strain: (json['strain'] as num?)?.toDouble() ?? 0,
+    start: DateTime.tryParse(json['start'] as String? ?? ''),
+  );
+}
+
 class WhoopSnapshot {
   const WhoopSnapshot({
+    this.workouts = const [],
     required this.connected,
     this.summaryDate,
     this.profileName = '',
@@ -773,6 +816,7 @@ class WhoopSnapshot {
   });
 
   final bool connected;
+  final List<WhoopWorkout> workouts;
   final DateTime? summaryDate;
   final String profileName;
   final String profileEmail;
@@ -843,6 +887,7 @@ class WhoopSnapshot {
     DateTime? stepsRecordedAt,
   }) {
     return WhoopSnapshot(
+      workouts: workouts,
       connected: connected ?? this.connected,
       summaryDate: summaryDate ?? this.summaryDate,
       profileName: profileName ?? this.profileName,
@@ -895,6 +940,7 @@ class WhoopSnapshot {
       'steps': steps,
       'stepsSource': stepsSource,
       'stepsRecordedAt': stepsRecordedAt?.toIso8601String(),
+      'workouts': [for (final workout in workouts) workout.toJson()],
     };
   }
 
@@ -948,6 +994,11 @@ class WhoopSnapshot {
       steps: intFrom('steps'),
       stepsSource: json['stepsSource'] as String? ?? '',
       stepsRecordedAt: dateFrom(json['stepsRecordedAt']),
+      workouts: [
+        for (final item in json['workouts'] as List? ?? const [])
+          if (item is Map)
+            WhoopWorkout.fromJson(Map<String, dynamic>.from(item)),
+      ],
     );
   }
 }
@@ -1155,10 +1206,19 @@ class LogApiClient {
   final String baseUrl;
   final String token;
 
-  Future<LoggedDay> parse(String text, {double? bodyWeightLb}) async {
+  Future<LoggedDay> parse(
+    String text, {
+    double? bodyWeightLb,
+    List<LogPhoto> photos = const [],
+  }) async {
     final json = await AuthBackendClient(baseUrl).sendJson('POST', '/api/log', {
       'text': text,
       'bodyWeightLb': ?bodyWeightLb,
+      if (photos.isNotEmpty)
+        'images': [
+          for (final photo in photos)
+            {'mediaType': photo.mediaType, 'data': base64Encode(photo.bytes)},
+        ],
     }, token: token);
     return LoggedDay.fromJson(json);
   }
@@ -1169,17 +1229,59 @@ class SavedMeal {
     required this.name,
     required this.calories,
     required this.proteinGrams,
+    this.ingredients = '',
+    this.portions = 1,
   });
 
   final String name;
   final int calories;
   final double proteinGrams;
+  final String ingredients;
+  final int portions;
 
   factory SavedMeal.fromJson(Map<String, dynamic> json) {
     return SavedMeal(
       name: json['name'] as String? ?? '',
       calories: (json['calories'] as num?)?.round() ?? 0,
       proteinGrams: (json['proteinGrams'] as num?)?.toDouble() ?? 0,
+      ingredients: json['ingredients'] as String? ?? '',
+      portions: (json['portions'] as num?)?.round() ?? 1,
+    );
+  }
+}
+
+class LogPhoto {
+  const LogPhoto({required this.bytes, required this.mediaType});
+
+  final List<int> bytes;
+  final String mediaType;
+}
+
+class MealEstimate {
+  const MealEstimate({
+    required this.name,
+    required this.calories,
+    required this.proteinGrams,
+    required this.items,
+    required this.assumption,
+  });
+
+  final String name;
+  final int calories;
+  final double proteinGrams;
+  final List<SavedMeal> items;
+  final String assumption;
+
+  factory MealEstimate.fromJson(Map<String, dynamic> json) {
+    return MealEstimate(
+      name: json['name'] as String? ?? '',
+      calories: (json['calories'] as num?)?.round() ?? 0,
+      proteinGrams: (json['proteinGrams'] as num?)?.toDouble() ?? 0,
+      items: [
+        for (final item in json['items'] as List? ?? const [])
+          SavedMeal.fromJson(Map<String, dynamic>.from(item as Map)),
+      ],
+      assumption: json['assumption'] as String? ?? '',
     );
   }
 }
@@ -1196,7 +1298,23 @@ class MealsApiClient {
     'name': meal.name,
     'calories': meal.calories,
     'proteinGrams': meal.proteinGrams,
+    'ingredients': meal.ingredients,
+    'portions': meal.portions,
   });
+
+  Future<MealEstimate> estimate(
+    String name,
+    String ingredients, {
+    int portions = 1,
+  }) async {
+    final json = await AuthBackendClient(baseUrl).sendJson(
+      'POST',
+      '/api/meals/estimate',
+      {'name': name, 'ingredients': ingredients, 'portions': portions},
+      token: token,
+    );
+    return MealEstimate.fromJson(json);
+  }
 
   Future<List<SavedMeal>> remove(String name) =>
       _send('DELETE', '/api/meals/${Uri.encodeComponent(name)}', const {});
@@ -1247,10 +1365,26 @@ class AuthSession {
 
   String get shortName {
     final trimmed = displayName.trim();
-    if (trimmed.isNotEmpty) {
+    if (trimmed.isNotEmpty && !trimmed.contains('@')) {
       return trimmed;
     }
-    return email;
+    return 'Athlete';
+  }
+
+  bool get hasPrivateEmail =>
+      email.isEmpty || email.endsWith('privaterelay.appleid.com');
+
+  AuthSession copyWith({String? displayName}) {
+    return AuthSession(
+      userId: userId,
+      email: email,
+      displayName: displayName ?? this.displayName,
+      provider: provider,
+      signedInAt: signedInAt,
+      photoUrl: photoUrl,
+      backendToken: backendToken,
+      expiresAt: expiresAt,
+    );
   }
 
   Map<String, dynamic> toJson() {
@@ -1562,6 +1696,29 @@ class AuthController extends ChangeNotifier {
       );
       await _save();
     });
+  }
+
+  Future<bool> updateDisplayName(String name) async {
+    final current = session;
+    final trimmed = name.trim();
+    if (current == null || trimmed.isEmpty) {
+      return false;
+    }
+    var saved = false;
+    await _runAuthAction(() async {
+      if (current.backendToken.isNotEmpty) {
+        await AuthBackendClient(authBackendUrl).sendJson(
+          'PATCH',
+          '/api/account',
+          {'displayName': trimmed},
+          token: current.backendToken,
+        );
+      }
+      session = current.copyWith(displayName: trimmed);
+      await _save();
+      saved = true;
+    });
+    return saved;
   }
 
   void clearError() {
@@ -2140,6 +2297,31 @@ class SculptusState extends ChangeNotifier {
     return activityBurnFor(date) + stepBurnFor(date);
   }
 
+  List<DiaryEntry> recentFoods({DateTime? exclude, int limit = 20}) {
+    final excludeKey = exclude == null ? null : _dateKey(exclude);
+    final counts = <String, int>{};
+    final latest = <String, DiaryEntry>{};
+    for (final entry in entries) {
+      if (_dateKey(entry.date) == excludeKey) {
+        continue;
+      }
+      final key = entry.name.trim().toLowerCase();
+      counts[key] = (counts[key] ?? 0) + 1;
+      final current = latest[key];
+      if (current == null || entry.createdAt.isAfter(current.createdAt)) {
+        latest[key] = entry;
+      }
+    }
+    final keys = latest.keys.toList()
+      ..sort((a, b) {
+        final byCount = counts[b]!.compareTo(counts[a]!);
+        return byCount != 0
+            ? byCount
+            : latest[b]!.createdAt.compareTo(latest[a]!.createdAt);
+      });
+    return [for (final key in keys.take(limit)) latest[key]!];
+  }
+
   int balanceFor(DateTime date) {
     final maintenance = maintenanceFor(date);
     return maintenance == null
@@ -2257,7 +2439,9 @@ class SculptusState extends ChangeNotifier {
       );
     }
 
-    final hasWhoopWorkout = activities.any((entry) => entry.id == 'whoop-$key');
+    final hasWhoopWorkout = activities.any(
+      (entry) => entry.id.startsWith('whoop-$key'),
+    );
     if (!hasWhoopWorkout) {
       for (final workout in log.workouts) {
         if (workout.caloriesBurned <= 0 ||
@@ -2417,9 +2601,37 @@ class SculptusState extends ChangeNotifier {
 
     final workoutCalories = snapshot.todayWorkoutCalories;
     final whoopActivityId = 'whoop-${_dateKey(summaryDate)}';
-    activities.removeWhere((entry) => entry.id == whoopActivityId);
+    activities.removeWhere(
+      (entry) =>
+          entry.id == whoopActivityId ||
+          entry.id.startsWith('$whoopActivityId-'),
+    );
 
-    if (workoutCalories > 0) {
+    final splitWorkouts = snapshot.workouts
+        .where((workout) => workout.calories > 0)
+        .toList();
+    if (splitWorkouts.isNotEmpty) {
+      for (var i = 0; i < splitWorkouts.length; i++) {
+        final workout = splitWorkouts[i];
+        activities.add(
+          ActivityEntry(
+            id: '$whoopActivityId-$i',
+            date: summaryDate,
+            name: workout.displayName,
+            caloriesBurned: workout.calories,
+            minutes: workout.minutes,
+            notes: workout.strain > 0
+                ? 'WHOOP · strain ${workout.strain.toStringAsFixed(1)}'
+                : 'WHOOP',
+            createdAt: workout.start ?? DateTime.now(),
+          ),
+        );
+      }
+      final typedWorkoutPrefix = 'log-workout-${_dateKey(summaryDate)}';
+      activities.removeWhere(
+        (entry) => entry.id.startsWith(typedWorkoutPrefix),
+      );
+    } else if (workoutCalories > 0) {
       final count = snapshot.todayWorkoutCount;
       final name = count > 1
           ? 'WHOOP workouts ($count)'
@@ -2619,7 +2831,11 @@ class _SculptusAppState extends State<SculptusApp> {
           DefaultMaterialLocalizations.delegate,
           DefaultWidgetsLocalizations.delegate,
         ],
-        builder: (context, child) => ShadAppBuilder(child: child!),
+        builder: (context, child) => GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+          child: ShadAppBuilder(child: child!),
+        ),
         home: AnimatedBuilder(
           animation: Listenable.merge([state, auth]),
           builder: (context, _) {

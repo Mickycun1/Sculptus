@@ -254,6 +254,21 @@ export class WhoopClient {
       todayWorkoutCalories: Math.round(workoutKilojoules * 0.239006),
       todayWorkoutCount: workoutRecords.length,
       todayWorkoutMinutes,
+      workouts: workoutRecords.map((workout) => {
+        const score = objectOf(workout.score);
+        const startedAt = Date.parse(stringOf(workout.start));
+        const endedAt = Date.parse(stringOf(workout.end));
+        return {
+          name: stringOf(workout.sport_name),
+          start: stringOf(workout.start),
+          minutes:
+            Number.isFinite(startedAt) && Number.isFinite(endedAt)
+              ? Math.max(Math.round((endedAt - startedAt) / 60000), 0)
+              : 0,
+          calories: Math.round(numberOf(score.kilojoule) * 0.239006),
+          strain: numberOf(score.strain)
+        };
+      }),
       latestWorkoutName: stringOf(latestWorkout.sport_name),
       latestWorkoutStart: stringOf(latestWorkout.start),
       latestWorkoutStrain: numberOf(latestWorkoutScore.strain),

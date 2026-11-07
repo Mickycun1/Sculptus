@@ -34,8 +34,116 @@ class _TodayScreenState extends State<TodayScreen> {
   String errorMessage = '';
   String question = '';
   List<LoggedFood> considering = const [];
+  List<LogPhoto> photos = const [];
 
-  DateTime get today => _dateOnly(DateTime.now());
+  Future<void> _addPhoto() async {
+    final source = await showShadSheet<ImageSource>(
+      context: context,
+      side: ShadSheetSide.bottom,
+      builder: (context) => ShadSheet(
+        title: const Text('Add a photo'),
+        description: const Text(
+          'Your plate, a food label, a screenshot of today\'s workout in '
+          'Wodify, or the whiteboard. Sculptus reads it with your log.',
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ShadButton.outline(
+                onPressed: () => Navigator.of(context).pop(ImageSource.gallery),
+                leading: const Icon(LucideIcons.images, size: 16),
+                child: const Text('Choose a screenshot'),
+              ),
+              const SizedBox(height: 8),
+              ShadButton.outline(
+                onPressed: () => Navigator.of(context).pop(ImageSource.camera),
+                leading: const Icon(LucideIcons.camera, size: 16),
+                child: const Text('Take a photo'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (source == null) {
+      return;
+    }
+    final picked = await ImagePicker().pickImage(
+      source: source,
+      maxWidth: 1600,
+      maxHeight: 1600,
+      imageQuality: 80,
+    );
+    if (picked == null) {
+      return;
+    }
+    final bytes = await picked.readAsBytes();
+    final mediaType =
+        picked.mimeType ??
+        (picked.name.toLowerCase().endsWith('.png')
+            ? 'image/png'
+            : 'image/jpeg');
+    setState(() {
+      photos = [
+        ...photos,
+        LogPhoto(bytes: bytes, mediaType: mediaType),
+      ].take(3).toList();
+    });
+  }
+
+  DateTime today = _dateOnly(DateTime.now());
+
+  bool get isToday => _dateKey(today) == _dateKey(DateTime.now());
+
+  void _goTo(DateTime day) {
+    final now = _dateOnly(DateTime.now());
+    final next = _dateOnly(day).isAfter(now) ? now : _dateOnly(day);
+    setState(() {
+      today = next;
+      question = '';
+      considering = const [];
+      errorMessage = '';
+    });
+    if (widget.state.whoop.connected) {
+      _syncWhoop();
+    }
+  }
+
+  Future<void> _pickDate() async {
+    final now = _dateOnly(DateTime.now());
+    final picked = await showShadDialog<DateTime>(
+      context: context,
+      builder: (context) => ShadDialog(
+        title: const Text('Go to a day'),
+        child: ShadCalendar(
+          selected: today,
+          initialMonth: today,
+          toMonth: now,
+          selectableDayPredicate: (day) => !_dateOnly(day).isAfter(now),
+          onChanged: (day) {
+            if (day != null) {
+              Navigator.of(context).pop(day);
+            }
+          },
+        ),
+      ),
+    );
+    if (picked != null) {
+      _goTo(picked);
+    }
+  }
+
+  Future<void> _addRecent() async {
+    await showShadSheet<void>(
+      context: context,
+      side: ShadSheetSide.bottom,
+      builder: (context) =>
+          RecentsSheet(state: widget.state, auth: widget.auth, date: today),
+    );
+  }
+
   String get token => widget.auth.session?.backendToken ?? '';
 
   @override
@@ -78,7 +186,8 @@ class _TodayScreenState extends State<TodayScreen> {
       builder: (context) => ShadDialog(
         title: const Text('How logging works'),
         description: const Text(
-          'Sculptus sends what you type here to Anthropic\'s Claude AI to '
+          'Sculptus sends what you type here, and any photos you add, to '
+          'Anthropic\'s Claude AI to '
           'estimate calories, protein, workouts, steps and weight. Anthropic '
           'does not use it to train its models. Nothing else from your '
           'account is sent.',
@@ -104,7 +213,7 @@ class _TodayScreenState extends State<TodayScreen> {
 
   Future<void> _submit() async {
     final text = logText.text.trim();
-    if (text.isEmpty || isLogging) {
+    if ((text.isEmpty && photos.isEmpty) || isLogging) {
       return;
     }
     FocusScope.of(context).unfocus();
@@ -120,9 +229,11 @@ class _TodayScreenState extends State<TodayScreen> {
       final log = await LogApiClient(widget.auth.authBackendUrl, token).parse(
         text,
         bodyWeightLb: state.weightTrendFor(today) ?? state.latestWeight?.weight,
+        photos: photos,
       );
       await state.applyLog(log, today);
       logText.clear();
+      photos = const [];
       setState(() {
         question = log.question ?? '';
         considering = log.considering;
@@ -166,6 +277,7 @@ class _TodayScreenState extends State<TodayScreen> {
     return RefreshIndicator(
       onRefresh: _syncWhoop,
       child: ListView(
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 40),
         children: [
           Row(
@@ -174,16 +286,46 @@ class _TodayScreenState extends State<TodayScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      _weekdays[today.weekday - 1],
-                      style: theme.textTheme.h3.copyWith(
-                        fontWeight: FontWeight.w800,
+                    GestureDetector(
+                      key: const ValueKey('datePicker'),
+                      onTap: _pickDate,
+                      child: Row(
+                        children: [
+                          Text(
+                            isToday ? 'Today' : _weekdays[today.weekday - 1],
+                            style: theme.textTheme.h3.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          Icon(
+                            LucideIcons.chevronDown,
+                            size: 18,
+                            color: theme.colorScheme.mutedForeground,
+                          ),
+                        ],
                       ),
                     ),
                     Text(_displayDate(today), style: theme.textTheme.muted),
                   ],
                 ),
               ),
+              ShadIconButton.ghost(
+                key: const ValueKey('previousDay'),
+                icon: const Icon(LucideIcons.chevronLeft, size: 20),
+                onPressed: () =>
+                    _goTo(DateTime(today.year, today.month, today.day - 1)),
+              ),
+              ShadIconButton.ghost(
+                key: const ValueKey('nextDay'),
+                icon: const Icon(LucideIcons.chevronRight, size: 20),
+                onPressed: isToday
+                    ? null
+                    : () => _goTo(
+                        DateTime(today.year, today.month, today.day + 1),
+                      ),
+              ),
+              const SizedBox(width: 4),
               GestureDetector(
                 key: const ValueKey('profileButton'),
                 onTap: _openProfile,
@@ -241,18 +383,68 @@ class _TodayScreenState extends State<TodayScreen> {
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    Icon(
-                      LucideIcons.sparkles,
-                      size: 14,
-                      color: theme.colorScheme.mutedForeground,
+                    ShadIconButton.ghost(
+                      key: const ValueKey('todayAddPhoto'),
+                      icon: const Icon(LucideIcons.imagePlus, size: 18),
+                      onPressed: isLogging || photos.length >= 3
+                          ? null
+                          : _addPhoto,
+                    ),
+                    Expanded(
+                      child: photos.isEmpty
+                          ? Text(
+                              'Photo of food, a label or your WOD',
+                              style: theme.textTheme.muted.copyWith(
+                                fontSize: 12,
+                              ),
+                            )
+                          : Wrap(
+                              spacing: 6,
+                              children: [
+                                for (final photo in photos)
+                                  GestureDetector(
+                                    onTap: () => setState(() {
+                                      photos = [
+                                        for (final other in photos)
+                                          if (other != photo) other,
+                                      ];
+                                    }),
+                                    child: Stack(
+                                      children: [
+                                        ClipRRect(
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                          child: Image.memory(
+                                            Uint8List.fromList(photo.bytes),
+                                            width: 40,
+                                            height: 40,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        ),
+                                        const Positioned(
+                                          right: 2,
+                                          top: 2,
+                                          child: Icon(
+                                            LucideIcons.circleX,
+                                            size: 14,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            ),
+                    ),
+                    ShadButton.outline(
+                      key: const ValueKey('todayRecents'),
+                      size: ShadButtonSize.sm,
+                      onPressed: isLogging ? null : _addRecent,
+                      leading: const Icon(LucideIcons.history, size: 14),
+                      child: const Text('Recents'),
                     ),
                     const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        'Meals, workouts, steps, weight',
-                        style: theme.textTheme.muted.copyWith(fontSize: 12),
-                      ),
-                    ),
                     ShadButton(
                       key: const ValueKey('todayLogSend'),
                       size: ShadButtonSize.sm,
@@ -564,6 +756,7 @@ class WorkoutRow extends StatelessWidget {
     final isWod = workout.id.startsWith('wod-');
     final isWhoop = workout.id.startsWith('whoop-');
     final subtitle = [
+      if (isWhoop && workout.notes.startsWith('WHOOP')) workout.notes,
       if (isWod) 'Estimated from the work',
       if (isWhoop && overridden) 'Not counted: using your WOD estimate',
       if (workout.minutes > 0) '${workout.minutes} min',
@@ -673,14 +866,68 @@ class _FoodSheetState extends State<FoodSheet> {
   late final protein = TextEditingController(
     text: _formatNumber(widget.entry.nutrition.protein.roundToDouble()),
   );
+  final correction = TextEditingController();
   bool saving = false;
+  bool fixing = false;
+  String fixError = '';
 
   @override
   void dispose() {
     name.dispose();
     calories.dispose();
     protein.dispose();
+    correction.dispose();
     super.dispose();
+  }
+
+  Future<void> _fix() async {
+    final note = correction.text.trim();
+    if (note.isEmpty || fixing) {
+      return;
+    }
+    FocusScope.of(context).unfocus();
+    setState(() {
+      fixing = true;
+      fixError = '';
+    });
+    final entry = widget.entry;
+    final navigator = Navigator.of(context);
+    final sonner = ShadSonner.of(context);
+    try {
+      final log =
+          await LogApiClient(
+            widget.auth.authBackendUrl,
+            widget.auth.session?.backendToken ?? '',
+          ).parse(
+            'Correct one food that was logged wrong. Log only the corrected '
+            'food or foods, nothing else.\n'
+            'Logged as: ${entry.name}, ${entry.nutrition.calories} kcal'
+            '${entry.notes.isEmpty ? '' : ' (${entry.notes})'}.\n'
+            'What it actually was: $note',
+          );
+      if (log.foods.isEmpty) {
+        setState(() => fixError = 'Could not work that out. Add a bit more.');
+        return;
+      }
+      await widget.state.deleteEntry(entry.id);
+      await widget.state.applyLog(LoggedDay(foods: log.foods), entry.date);
+      final total = log.foods.fold<int>(0, (sum, food) => sum + food.calories);
+      navigator.pop();
+      sonner.show(
+        ShadToast(
+          title: const Text('Fixed'),
+          description: Text(
+            '${entry.nutrition.calories} kcal is now ${_thousands(total)} kcal.',
+          ),
+        ),
+      );
+    } catch (error) {
+      setState(() => fixError = error.toString());
+    } finally {
+      if (mounted) {
+        setState(() => fixing = false);
+      }
+    }
   }
 
   Future<void> _saveMeal() async {
@@ -767,6 +1014,44 @@ class _FoodSheetState extends State<FoodSheet> {
             ),
             const SizedBox(height: 20),
             Text(
+              'Not right? Say what it actually was',
+              style: theme.textTheme.p.copyWith(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            ShadInput(
+              key: const ValueKey('foodCorrection'),
+              controller: correction,
+              placeholder: const Text(
+                'It was Greek yogurt with sriracha, not mayo',
+              ),
+              onSubmitted: (_) => _fix(),
+              trailing: fixing
+                  ? const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : GestureDetector(
+                      key: const ValueKey('foodFix'),
+                      onTap: _fix,
+                      child: Icon(
+                        LucideIcons.refreshCw,
+                        size: 18,
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+            ),
+            if (fixError.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  fixError,
+                  style: theme.textTheme.small.copyWith(
+                    color: theme.colorScheme.destructive,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 20),
+            Text(
               'Save it as one of your meals',
               style: theme.textTheme.p.copyWith(fontWeight: FontWeight.w600),
             ),
@@ -804,6 +1089,137 @@ class _FoodSheetState extends State<FoodSheet> {
                 ),
               ],
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class RecentsSheet extends StatefulWidget {
+  const RecentsSheet({
+    super.key,
+    required this.state,
+    required this.auth,
+    required this.date,
+    this.mealsClient,
+  });
+
+  final SculptusState state;
+  final AuthController auth;
+  final DateTime date;
+  final MealsApiClient? mealsClient;
+
+  @override
+  State<RecentsSheet> createState() => _RecentsSheetState();
+}
+
+class _RecentsSheetState extends State<RecentsSheet> {
+  List<SavedMeal> meals = const [];
+  final added = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    final client =
+        widget.mealsClient ??
+        MealsApiClient(
+          widget.auth.authBackendUrl,
+          widget.auth.session?.backendToken ?? '',
+        );
+    client.list().then((result) {
+      if (mounted) {
+        setState(() => meals = result);
+      }
+    }, onError: (_) {});
+  }
+
+  Future<void> _add(
+    String name,
+    int calories,
+    double protein,
+    String note,
+  ) async {
+    await widget.state.applyLog(
+      LoggedDay(
+        foods: [
+          LoggedFood(
+            name: name,
+            calories: calories,
+            caloriesLow: 0,
+            caloriesHigh: 0,
+            proteinGrams: protein,
+            assumption: note,
+          ),
+        ],
+      ),
+      widget.date,
+    );
+    setState(() => added.add(name.toLowerCase()));
+  }
+
+  Widget _row(
+    String name,
+    int calories,
+    double protein,
+    String note,
+    IconData icon,
+  ) {
+    final theme = ShadTheme.of(context);
+    final done = added.contains(name.toLowerCase());
+    return ListRow(
+      leading: IconBubble(icon),
+      title: name,
+      subtitle: '${_thousands(calories)} kcal · ${protein.round()}g protein',
+      trailing: done
+          ? Icon(LucideIcons.check, size: 18, color: theme.colorScheme.primary)
+          : const Icon(LucideIcons.plus, size: 18),
+      onTap: done ? null : () => _add(name, calories, protein, note),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final recents = widget.state.recentFoods(exclude: widget.date);
+    return ShadSheet(
+      title: const Text('Add again'),
+      description: const Text('Tap to add it to this day. No typing needed.'),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.6,
+        ),
+        child: ListView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          shrinkWrap: true,
+          children: [
+            if (meals.isNotEmpty) ...[
+              const SectionLabel('My meals'),
+              for (final meal in meals)
+                _row(
+                  meal.name,
+                  meal.calories,
+                  meal.proteinGrams,
+                  'saved meal',
+                  LucideIcons.utensils,
+                ),
+            ],
+            const SectionLabel('Recent'),
+            if (recents.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                child: Text(
+                  'Foods you log show up here so you can add them again in one tap.',
+                  style: ShadTheme.of(context).textTheme.muted,
+                ),
+              ),
+            for (final entry in recents)
+              _row(
+                entry.name,
+                entry.nutrition.calories,
+                entry.nutrition.protein,
+                entry.notes,
+                LucideIcons.history,
+              ),
           ],
         ),
       ),
