@@ -236,9 +236,7 @@ class PaywallScreen extends StatelessWidget {
                   ShadButton.link(
                     size: ShadButtonSize.sm,
                     onPressed: () => launchUrl(
-                      Uri.parse(
-                        'https://www.apple.com/legal/internet-services/itunes/dev/stdeula/',
-                      ),
+                      Uri.parse('https://dynafex.ai/sculptus_terms.html'),
                       mode: LaunchMode.externalApplication,
                     ),
                     child: const Text('Terms'),
