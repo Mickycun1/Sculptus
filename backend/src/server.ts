@@ -9,6 +9,7 @@ import { type LogImage, LogParser } from "./logParser.js";
 import { Mailer } from "./mailer.js";
 import { createPasswordStore } from "./passwordStore.js";
 import { createMealStore } from "./mealStore.js";
+import { costOf, createUsageStore } from "./usageStore.js";
 import { createTokenStore } from "./tokenStore.js";
 import { WhoopClient } from "./whoopClient.js";
 
@@ -74,7 +75,12 @@ const googleClient = new OAuth2Client(config.googleWebClientId || undefined);
 const appleKeys = createRemoteJWKSet(
   new URL("https://appleid.apple.com/auth/keys")
 );
-const logParser = new LogParser(config.anthropicApiKey);
+const usageStore = await createUsageStore(config.mongoUri, config.mongoDbName);
+const logParser = new LogParser(config.anthropicApiKey, (usage, userId) => {
+  const record = { ...usage, userId, costUsd: costOf(usage.model, usage), at: new Date() };
+  console.log(JSON.stringify({ event: "ai_usage", ...record }));
+  usageStore.record(record).catch((error) => console.error("usage record failed", error));
+});
 
 function newOauthState() {
   return crypto.randomBytes(16).toString("hex");
@@ -179,7 +185,7 @@ app.post("/api/auth/apple", async (request, response) => {
       displayName:
         displayName ||
         (existing?.displayName.includes("@") ? "" : existing?.displayName) ||
-        "Sculptus athlete"
+        ""
     });
     const session = await authStore.createSession(
       user.id,
@@ -388,6 +394,7 @@ app.delete("/api/account", async (request, response) => {
       // Deleting the account must not depend on WHOOP being reachable.
     }
     await mealStore.removeAll(user.id);
+    await usageStore.removeAll(user.id);
     if (user.provider === "password") {
       await passwordStore.remove(user.providerSubject);
     }
@@ -426,7 +433,8 @@ app.post("/api/log", async (request, response) => {
         Number.isFinite(bodyWeight) && bodyWeight > 50 && bodyWeight < 700
           ? Math.round(bodyWeight)
           : null,
-        images
+        images,
+        user.id
       )
     );
   } catch (error) {
@@ -447,7 +455,7 @@ app.post("/api/meals/estimate", async (request, response) => {
       return;
     }
     const portions = Math.min(Math.max(Math.round(Number(request.body?.portions) || 1), 1), 50);
-    response.json(await logParser.estimateMeal(name, ingredients, portions));
+    response.json(await logParser.estimateMeal(name, ingredients, portions, user.id));
   } catch (error) {
     handleError(error, response);
   }

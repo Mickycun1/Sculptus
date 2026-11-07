@@ -85,16 +85,22 @@ void main() {
   testWidgets('signed out, Sculptus offers Apple and email sign in', (
     tester,
   ) async {
+    tester.view.physicalSize = const Size(1179, 2556);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.reset);
     SharedPreferences.setMockInitialValues({});
 
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
 
     expect(find.text('Sculptus'), findsOneWidget);
+    expect(find.text('Get started'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('welcomeSignIn')));
+    await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('authEmailField')), findsOneWidget);
     expect(find.byKey(const ValueKey('authPasswordField')), findsOneWidget);
     expect(find.byKey(const ValueKey('authNameField')), findsNothing);
-    await tester.tap(find.text('New here? Create an account'));
+    await tester.tap(find.text('Create an account'));
     await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('authNameField')), findsOneWidget);
     expect(find.text('Create account'), findsOneWidget);
@@ -114,6 +120,9 @@ void main() {
     await tester.pumpWidget(const SculptusApp());
     await tester.pumpAndSettle();
 
+    expect(find.text('What should we call you?'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('setupSkip')));
+    await tester.pumpAndSettle();
     expect(find.byKey(const ValueKey('todayLogField')), findsOneWidget);
     expect(find.text('Log it'), findsOneWidget);
     expect(find.text('MC'), findsOneWidget);
@@ -295,67 +304,113 @@ void main() {
     expect(find.text('Earth Bowl'), findsOneWidget);
   });
 
-  test('a pasted WOD estimate replaces the WHOOP burn for that day', () async {
+  test(
+    'WHOOP counts by default and the WOD estimate only when chosen',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final state = SculptusState();
+      await state.load();
+      final day = DateTime(2026, 11, 6);
+      await state.addActivity(
+        ActivityEntry(
+          id: 'whoop-2026-11-06',
+          date: day,
+          name: 'WHOOP workouts (2)',
+          caloriesBurned: 410,
+          createdAt: day,
+        ),
+      );
+      expect(state.activityBurnFor(day), 410);
+
+      await state.applyLog(
+        LoggedDay.fromJson({
+          'workouts': [
+            {
+              'name': 'CrossFit WOD',
+              'caloriesBurned': 0,
+              'estimatedCaloriesBurned': 330,
+              'minutes': 19,
+              'details': '5 rounds: 400m run, 15 thrusters @ 95 lb; 18:40',
+            },
+          ],
+        }),
+        day,
+      );
+
+      expect(state.activityBurnFor(day), 410);
+      expect(state.hasWodAndWhoop(day), isTrue);
+      final whoop = state
+          .activitiesFor(day)
+          .firstWhere((entry) => entry.id.startsWith('whoop-'));
+      expect(state.isActivityOverridden(whoop), isFalse);
+
+      await state.setPrefersWod(day, true);
+      expect(state.activityBurnFor(day), 330);
+      expect(state.isActivityOverridden(whoop), isTrue);
+
+      await state.setPrefersWod(day, false);
+      expect(state.activityBurnFor(day), 410);
+    },
+  );
+
+  test(
+    'a typed tracker burn counts unless the WOD estimate is chosen',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final state = SculptusState();
+      await state.load();
+      final day = DateTime(2026, 11, 6);
+
+      await state.applyLog(
+        LoggedDay.fromJson({
+          'workouts': [
+            {
+              'name': 'CrossFit',
+              'caloriesBurned': 571,
+              'estimatedCaloriesBurned': 400,
+              'minutes': 0,
+              'details': '5 rounds; 21:30',
+            },
+          ],
+        }),
+        day,
+      );
+
+      expect(state.activityBurnFor(day), 571);
+      await state.setPrefersWod(day, true);
+      expect(state.activityBurnFor(day), 400);
+      expect(
+        state
+            .activitiesFor(day)
+            .firstWhere((entry) => entry.id.startsWith('wod'))
+            .notes,
+        contains('Tracker said 571'),
+      );
+    },
+  );
+
+  testWidgets('the burn info explains resting, training and walking', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues({});
     final state = SculptusState();
     await state.load();
-    final day = DateTime(2026, 11, 6);
-    await state.addActivity(
-      ActivityEntry(
-        id: 'whoop-2026-11-06',
-        date: day,
-        name: 'WHOOP workouts (2)',
-        caloriesBurned: 410,
-        createdAt: day,
-      ),
+    final day = DateTime.now();
+    await state.updateGoals(
+      state.goals.copyWith(age: 33, heightInches: 75, sex: 'male'),
     );
-    expect(state.activityBurnFor(day), 410);
-
-    await state.applyLog(
-      LoggedDay.fromJson({
-        'workouts': [
-          {
-            'name': 'CrossFit WOD',
-            'caloriesBurned': 0,
-            'estimatedCaloriesBurned': 330,
-            'minutes': 19,
-            'details': '5 rounds: 400m run, 15 thrusters @ 95 lb; 18:40',
-          },
-        ],
-      }),
-      day,
+    await state.setWeight(day, 204);
+    final parts = state.burnBreakdownFor(day)!;
+    expect(
+      parts.resting + parts.training + parts.walking,
+      state.maintenanceFor(day),
     );
 
-    expect(state.activityBurnFor(day), 330);
-    final whoop = state
-        .activitiesFor(day)
-        .firstWhere((entry) => entry.id.startsWith('whoop-'));
-    expect(state.isActivityOverridden(whoop), isTrue);
-  });
-
-  test('a WOD estimate wins over a tracker number typed in the log', () async {
-    SharedPreferences.setMockInitialValues({});
-    final state = SculptusState();
-    await state.load();
-    final day = DateTime(2026, 11, 6);
-
-    await state.applyLog(
-      LoggedDay.fromJson({
-        'workouts': [
-          {
-            'name': 'CrossFit',
-            'caloriesBurned': 571,
-            'estimatedCaloriesBurned': 400,
-            'minutes': 0,
-            'details': '5 rounds; 21:30',
-          },
-        ],
-      }),
-      day,
-    );
-
-    expect(state.activityBurnFor(day), 400);
-    expect(state.activitiesFor(day).single.notes, contains('Tracker said 571'));
+    await tester.pumpWidget(shadHarness(BalanceCard(state: state, date: day)));
+    await tester.tap(find.byKey(const ValueKey('burnInfo')));
+    await tester.pumpAndSettle();
+    expect(find.text('How your burn is estimated'), findsOneWidget);
+    expect(find.text('Resting'), findsOneWidget);
   });
 
   test('recent foods are de-duplicated, most frequent first', () async {
@@ -384,6 +439,40 @@ void main() {
       'mexican bowl',
       'banana',
     ]);
+  });
+
+  testWidgets('setup saves age, height and weight, then opens Today', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final state = SculptusState();
+    await state.load();
+    var done = false;
+    await tester.pumpWidget(
+      shadHarness(
+        SetupScreen(
+          state: state,
+          auth: AuthController(),
+          onDone: () => done = true,
+        ),
+      ),
+    );
+    await tester.enterText(find.byKey(const ValueKey('setupName')), 'Mick');
+    await tester.tap(find.byKey(const ValueKey('setupContinue')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('setupAge')), '33');
+    await tester.enterText(find.byKey(const ValueKey('setupFeet')), '6');
+    await tester.enterText(find.byKey(const ValueKey('setupInches')), '3');
+    await tester.tap(find.byKey(const ValueKey('setupContinue')));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const ValueKey('setupWeight')), '204.3');
+    await tester.tap(find.byKey(const ValueKey('setupContinue')));
+    await tester.pumpAndSettle();
+
+    expect(done, isTrue);
+    expect(state.goals.age, 33);
+    expect(state.goals.heightInches, 75);
+    expect(state.latestWeight?.weight, 204.3);
   });
 
   testWidgets('a meal-prep batch is split into portions', (tester) async {

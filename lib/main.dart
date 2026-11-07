@@ -14,6 +14,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 part 'ui/auth_screen.dart';
 part 'ui/kit.dart';
+part 'ui/onboarding.dart';
 part 'ui/profile_screen.dart';
 part 'ui/today_screen.dart';
 
@@ -1365,7 +1366,9 @@ class AuthSession {
 
   String get shortName {
     final trimmed = displayName.trim();
-    if (trimmed.isNotEmpty && !trimmed.contains('@')) {
+    if (trimmed.isNotEmpty &&
+        !trimmed.contains('@') &&
+        trimmed.toLowerCase() != 'sculptus athlete') {
       return trimmed;
     }
     return 'Athlete';
@@ -2232,11 +2235,56 @@ class SculptusState extends ChangeNotifier {
   }
 
   bool isActivityOverridden(ActivityEntry entry) {
-    if (!entry.id.startsWith('whoop-')) {
-      return false;
-    }
     final key = _dateKey(entry.date);
-    return activities.any((item) => item.id.startsWith('wod-$key'));
+    if (_isTracker(entry, key)) {
+      return prefersWod(entry.date);
+    }
+    if (entry.id.startsWith('wod-$key')) {
+      return activities.any((item) => _isTracker(item, key));
+    }
+    return false;
+  }
+
+  bool _isTracker(ActivityEntry entry, String key) =>
+      entry.id.startsWith('whoop-$key') ||
+      entry.id.startsWith('log-workout-$key');
+
+  bool prefersWod(DateTime date) {
+    final key = _dateKey(date);
+    return activities.any((item) => item.id.startsWith('wodpick-$key'));
+  }
+
+  bool hasWodAndWhoop(DateTime date) {
+    final key = _dateKey(date);
+    return activities.any(
+          (item) =>
+              item.id.startsWith('wod-$key') ||
+              item.id.startsWith('wodpick-$key'),
+        ) &&
+        activities.any((item) => _isTracker(item, key));
+  }
+
+  Future<void> setPrefersWod(DateTime date, bool prefer) async {
+    final key = _dateKey(date);
+    final from = prefer ? 'wod-$key' : 'wodpick-$key';
+    final to = prefer ? 'wodpick-$key' : 'wod-$key';
+    for (var i = 0; i < activities.length; i++) {
+      final entry = activities[i];
+      if (!entry.id.startsWith(from)) {
+        continue;
+      }
+      activities[i] = ActivityEntry(
+        id: to + entry.id.substring(from.length),
+        date: entry.date,
+        name: entry.name,
+        caloriesBurned: entry.caloriesBurned,
+        minutes: entry.minutes,
+        notes: entry.notes,
+        createdAt: entry.createdAt,
+      );
+    }
+    notifyListeners();
+    await _save();
   }
 
   List<({DateTime date, double weight, double average})> weightSeries(
@@ -2358,6 +2406,16 @@ class SculptusState extends ChangeNotifier {
   bool get hasProfile => goals.age > 0 && goals.heightInches > 0;
 
   int? maintenanceFor(DateTime date) {
+    final parts = burnBreakdownFor(date);
+    if (parts == null) {
+      return null;
+    }
+    return parts.resting + parts.training + parts.walking;
+  }
+
+  ({int resting, int training, int walking, double weight})? burnBreakdownFor(
+    DateTime date,
+  ) {
     final weight = weightTrendFor(date) ?? latestWeight?.weight;
     if (!hasProfile || weight == null) {
       return null;
@@ -2369,8 +2427,12 @@ class SculptusState extends ChangeNotifier {
         6.25 * cm -
         5 * goals.age +
         (goals.sex == 'female' ? -161 : 5);
-    final walkingBurn = math.max(0, stepsFor(date) - 5000) * 0.045;
-    return (bmr * 1.2 + activityBurnFor(date) + walkingBurn).round();
+    return (
+      resting: (bmr * 1.2).round(),
+      training: activityBurnFor(date),
+      walking: (math.max(0, stepsFor(date) - 5000) * 0.045).round(),
+      weight: weight,
+    );
   }
 
   double? weightTrendFor(DateTime date) {
@@ -2416,7 +2478,11 @@ class SculptusState extends ChangeNotifier {
     }
 
     if (log.workouts.any((workout) => workout.estimatedCaloriesBurned > 0)) {
-      activities.removeWhere((entry) => entry.id.startsWith('wod-$key'));
+      activities.removeWhere(
+        (entry) =>
+            entry.id.startsWith('wod-$key') ||
+            entry.id.startsWith('wodpick-$key'),
+      );
     }
     for (final workout in log.workouts) {
       if (workout.estimatedCaloriesBurned <= 0) {
@@ -2444,8 +2510,7 @@ class SculptusState extends ChangeNotifier {
     );
     if (!hasWhoopWorkout) {
       for (final workout in log.workouts) {
-        if (workout.caloriesBurned <= 0 ||
-            workout.estimatedCaloriesBurned > 0) {
+        if (workout.caloriesBurned <= 0) {
           continue;
         }
         activities.add(
@@ -2801,6 +2866,7 @@ class SculptusApp extends StatefulWidget {
 class _SculptusAppState extends State<SculptusApp> {
   final SculptusState state = SculptusState();
   final AuthController auth = AuthController();
+  bool setupSkipped = false;
 
   @override
   void initState() {
@@ -2843,7 +2909,14 @@ class _SculptusAppState extends State<SculptusApp> {
               return const LoadingScreen();
             }
             if (!auth.isSignedIn) {
-              return AuthScreen(auth: auth);
+              return WelcomeScreen(auth: auth);
+            }
+            if (!state.hasProfile && !setupSkipped) {
+              return SetupScreen(
+                state: state,
+                auth: auth,
+                onDone: () => setState(() => setupSkipped = true),
+              );
             }
             return HomeShell(state: state, auth: auth);
           },

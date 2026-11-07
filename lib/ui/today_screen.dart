@@ -30,6 +30,7 @@ class TodayScreen extends StatefulWidget {
 
 class _TodayScreenState extends State<TodayScreen> {
   final logText = TextEditingController();
+  final nameText = TextEditingController();
   bool isLogging = false;
   String errorMessage = '';
   String question = '';
@@ -157,6 +158,7 @@ class _TodayScreenState extends State<TodayScreen> {
   @override
   void dispose() {
     logText.dispose();
+    nameText.dispose();
     super.dispose();
   }
 
@@ -244,6 +246,47 @@ class _TodayScreenState extends State<TodayScreen> {
       if (mounted) {
         setState(() => isLogging = false);
       }
+    }
+  }
+
+  Future<void> _chooseBurn(DateTime day) async {
+    final state = widget.state;
+    final whoop = state
+        .activitiesFor(day)
+        .where(
+          (entry) =>
+              entry.id.startsWith('whoop-') ||
+              entry.id.startsWith('log-workout-'),
+        )
+        .fold<int>(0, (sum, entry) => sum + entry.caloriesBurned);
+    final wod = state
+        .activitiesFor(day)
+        .where((entry) => entry.id.startsWith('wod'))
+        .fold<int>(0, (sum, entry) => sum + entry.caloriesBurned);
+    final preferWod = await showShadDialog<bool>(
+      context: context,
+      builder: (context) => ShadDialog(
+        title: const Text('Which burn counts today?'),
+        description: const Text(
+          'WHOOP measured your heart rate. The WOD estimate comes from the work '
+          'you logged. Only one counts toward your deficit.',
+        ),
+        actions: [
+          ShadButton.outline(
+            key: const ValueKey('useWhoopBurn'),
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text('Tracker · ${_thousands(whoop)}'),
+          ),
+          ShadButton(
+            key: const ValueKey('useWodBurn'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text('WOD estimate · ${_thousands(wod)}'),
+          ),
+        ],
+      ),
+    );
+    if (preferWod != null) {
+      await state.setPrefersWod(day, preferWod);
     }
   }
 
@@ -336,6 +379,33 @@ class _TodayScreenState extends State<TodayScreen> {
             ],
           ),
           const SizedBox(height: 16),
+          if (widget.auth.session?.shortName == 'Athlete') ...[
+            ShadCard(
+              padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ShadInput(
+                      key: const ValueKey('todayNameField'),
+                      controller: nameText,
+                      placeholder: const Text('What should we call you?'),
+                      leading: const Icon(LucideIcons.user, size: 16),
+                      onSubmitted: (value) =>
+                          widget.auth.updateDisplayName(value),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ShadButton(
+                    size: ShadButtonSize.sm,
+                    onPressed: () =>
+                        widget.auth.updateDisplayName(nameText.text),
+                    child: const Text('Save'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           BalanceCard(state: state, date: today),
           if (!state.hasProfile) ...[
             const SizedBox(height: 12),
@@ -503,6 +573,9 @@ class _TodayScreenState extends State<TodayScreen> {
                     WorkoutRow(
                       workout: workout,
                       overridden: state.isActivityOverridden(workout),
+                      onTap: state.hasWodAndWhoop(today)
+                          ? () => _chooseBurn(today)
+                          : null,
                     ),
                 ],
               ),
@@ -636,6 +709,10 @@ class BalanceCard extends StatelessWidget {
                     : '~${_thousands(maintenance)} burned',
                 style: theme.textTheme.small,
               ),
+              if (maintenance != null) ...[
+                const SizedBox(width: 4),
+                BurnInfoButton(state: state, date: date),
+              ],
             ],
           ),
           const SizedBox(height: 16),
@@ -662,6 +739,117 @@ class BalanceCard extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class BurnInfoButton extends StatefulWidget {
+  const BurnInfoButton({super.key, required this.state, required this.date});
+
+  final SculptusState state;
+  final DateTime date;
+
+  @override
+  State<BurnInfoButton> createState() => _BurnInfoButtonState();
+}
+
+class _BurnInfoButtonState extends State<BurnInfoButton> {
+  final controller = ShadPopoverController();
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = ShadTheme.of(context);
+    final parts = widget.state.burnBreakdownFor(widget.date);
+    final steps = widget.state.stepsFor(widget.date);
+    final small = theme.textTheme.small;
+    final muted = theme.textTheme.muted.copyWith(fontSize: 12);
+
+    Widget line(String label, int value, String detail) => Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text(label, style: small)),
+              Text(_thousands(value), style: small),
+            ],
+          ),
+          Text(detail, style: muted),
+        ],
+      ),
+    );
+
+    return ShadPopover(
+      controller: controller,
+      popover: (context) => SizedBox(
+        width: 260,
+        child: parts == null
+            ? const SizedBox.shrink()
+            : Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'How your burn is estimated',
+                    style: small.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 10),
+                  line(
+                    'Resting',
+                    parts.resting,
+                    'Mifflin-St Jeor from your ${parts.weight.toStringAsFixed(1)} lb '
+                        '7-day average, height, age and sex, ×1.2 for daily living',
+                  ),
+                  line(
+                    'Training',
+                    parts.training,
+                    'WHOOP or your WOD estimate, whichever counts today',
+                  ),
+                  line(
+                    'Walking',
+                    parts.walking,
+                    steps > 5000
+                        ? '${_thousands(steps - 5000)} steps over 5,000, at about '
+                              '0.045 kcal each'
+                        : 'Counts steps over 5,000',
+                  ),
+                  const ShadSeparator.horizontal(),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Estimated burn',
+                          style: small.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                      Text(
+                        _thousands(
+                          parts.resting + parts.training + parts.walking,
+                        ),
+                        style: small.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+      ),
+      child: GestureDetector(
+        key: const ValueKey('burnInfo'),
+        onTap: controller.toggle,
+        child: Icon(
+          LucideIcons.info,
+          size: 14,
+          color: theme.colorScheme.mutedForeground,
+        ),
       ),
     );
   }
@@ -745,20 +933,27 @@ class WorkoutRow extends StatelessWidget {
     super.key,
     required this.workout,
     required this.overridden,
+    this.onTap,
   });
 
   final ActivityEntry workout;
   final bool overridden;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = ShadTheme.of(context);
-    final isWod = workout.id.startsWith('wod-');
-    final isWhoop = workout.id.startsWith('whoop-');
+    final isWod = workout.id.startsWith('wod');
+    final isWhoop =
+        workout.id.startsWith('whoop-') ||
+        workout.id.startsWith('log-workout-');
     final subtitle = [
       if (isWhoop && workout.notes.startsWith('WHOOP')) workout.notes,
       if (isWod) 'Estimated from the work',
-      if (isWhoop && overridden) 'Not counted: using your WOD estimate',
+      if (overridden)
+        isWhoop
+            ? 'Not counted: using your WOD estimate. Tap to change'
+            : 'Not counted: using your tracker. Tap to use this instead',
       if (workout.minutes > 0) '${workout.minutes} min',
       if (isWod && workout.notes.isNotEmpty) workout.notes,
     ].join(' · ');
@@ -769,6 +964,7 @@ class WorkoutRow extends StatelessWidget {
       ),
       title: workout.name,
       subtitle: subtitle,
+      onTap: onTap,
       trailing: Text(
         '-${_thousands(workout.caloriesBurned)}',
         style: theme.textTheme.p.copyWith(
@@ -835,136 +1031,235 @@ Future<void> showFoodSheet(
   required SculptusState state,
   required AuthController auth,
 }) {
-  return showShadSheet<void>(
-    context: context,
-    side: ShadSheetSide.bottom,
-    builder: (context) => FoodSheet(entry: entry, state: state, auth: auth),
+  return Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      builder: (context) => FoodPage(entry: entry, state: state, auth: auth),
+    ),
   );
 }
 
-class FoodSheet extends StatefulWidget {
-  const FoodSheet({
+SavedMeal? _templateFor(DiaryEntry entry, List<SavedMeal> meals) {
+  final name = entry.name.trim().toLowerCase();
+  for (final meal in meals) {
+    if (meal.name.trim().toLowerCase() == name) {
+      return meal;
+    }
+  }
+  if (!entry.notes.toLowerCase().contains('saved meal')) {
+    return null;
+  }
+  for (final meal in meals) {
+    if (name.contains(meal.name.trim().toLowerCase())) {
+      return meal;
+    }
+  }
+  return null;
+}
+
+class FoodPage extends StatefulWidget {
+  const FoodPage({
     super.key,
     required this.entry,
     required this.state,
     required this.auth,
+    this.mealsClient,
   });
 
   final DiaryEntry entry;
   final SculptusState state;
   final AuthController auth;
+  final MealsApiClient? mealsClient;
 
   @override
-  State<FoodSheet> createState() => _FoodSheetState();
+  State<FoodPage> createState() => _FoodPageState();
 }
 
-class _FoodSheetState extends State<FoodSheet> {
+class _FoodPageState extends State<FoodPage> {
+  late DiaryEntry entry = widget.entry;
+  final change = TextEditingController();
   late final name = TextEditingController(text: widget.entry.name);
-  late final calories = TextEditingController(
-    text: '${widget.entry.nutrition.calories}',
-  );
-  late final protein = TextEditingController(
-    text: _formatNumber(widget.entry.nutrition.protein.roundToDouble()),
-  );
-  final correction = TextEditingController();
+  SavedMeal? template;
+  bool updateTemplate = false;
+  bool working = false;
   bool saving = false;
-  bool fixing = false;
-  String fixError = '';
+  String errorMessage = '';
+
+  MealsApiClient get client =>
+      widget.mealsClient ??
+      MealsApiClient(
+        widget.auth.authBackendUrl,
+        widget.auth.session?.backendToken ?? '',
+      );
+
+  @override
+  void initState() {
+    super.initState();
+    client.list().then((meals) {
+      if (mounted) {
+        setState(() => template = _templateFor(entry, meals));
+      }
+    }, onError: (_) {});
+  }
 
   @override
   void dispose() {
+    change.dispose();
     name.dispose();
-    calories.dispose();
-    protein.dispose();
-    correction.dispose();
     super.dispose();
   }
 
-  Future<void> _fix() async {
-    final note = correction.text.trim();
-    if (note.isEmpty || fixing) {
+  String get _earlierChanges {
+    const prefix = 'saved meal · today: ';
+    return entry.notes.startsWith(prefix)
+        ? entry.notes.substring(prefix.length)
+        : '';
+  }
+
+  String _todayNotes(String note) {
+    final earlier = _earlierChanges;
+    return 'saved meal · today: ${earlier.isEmpty ? note : '$earlier, $note'}';
+  }
+
+  String _prompt(String note) {
+    final template = this.template;
+    if (template != null) {
+      return 'Recalculate one serving of a saved meal with today\'s change. '
+          'Log exactly one food named "${template.name}", nothing else.\n'
+          'Saved meal: ${template.name}, ${template.calories} kcal and '
+          '${_formatNumber(template.proteinGrams)}g protein per portion'
+          '${template.ingredients.isEmpty ? '' : '. The whole batch is: ${template.ingredients.replaceAll('\n', ', ')}, making ${template.portions} portion(s)'}.\n'
+          '${_earlierChanges.isEmpty ? '' : 'Earlier changes today, keep them: $_earlierChanges.\n'}'
+          'New change: $note';
+    }
+    return 'Correct one food that was logged wrong. Log only the corrected '
+        'food or foods, nothing else.\n'
+        'Logged as: ${entry.name}, ${entry.nutrition.calories} kcal'
+        '${entry.notes.isEmpty ? '' : ' (${entry.notes})'}.\n'
+        'What it actually was: $note';
+  }
+
+  Future<void> _apply() async {
+    final note = change.text.trim();
+    if (note.isEmpty || working) {
       return;
     }
     FocusScope.of(context).unfocus();
     setState(() {
-      fixing = true;
-      fixError = '';
+      working = true;
+      errorMessage = '';
     });
-    final entry = widget.entry;
-    final navigator = Navigator.of(context);
     final sonner = ShadSonner.of(context);
+    final before = entry.nutrition.calories;
     try {
-      final log =
-          await LogApiClient(
-            widget.auth.authBackendUrl,
-            widget.auth.session?.backendToken ?? '',
-          ).parse(
-            'Correct one food that was logged wrong. Log only the corrected '
-            'food or foods, nothing else.\n'
-            'Logged as: ${entry.name}, ${entry.nutrition.calories} kcal'
-            '${entry.notes.isEmpty ? '' : ' (${entry.notes})'}.\n'
-            'What it actually was: $note',
-          );
+      final log = await LogApiClient(
+        widget.auth.authBackendUrl,
+        widget.auth.session?.backendToken ?? '',
+      ).parse(_prompt(note));
       if (log.foods.isEmpty) {
-        setState(() => fixError = 'Could not work that out. Add a bit more.');
+        setState(
+          () => errorMessage = 'Could not work that out. Add a bit more.',
+        );
         return;
       }
+      final template = this.template;
+      final foods = template == null
+          ? log.foods
+          : [
+              LoggedFood(
+                name: template.name,
+                calories: log.foods.fold(0, (sum, food) => sum + food.calories),
+                caloriesLow: 0,
+                caloriesHigh: 0,
+                proteinGrams: log.foods.fold(
+                  0.0,
+                  (sum, food) => sum + food.proteinGrams,
+                ),
+                assumption: _todayNotes(note),
+              ),
+            ];
+      final oldIds = {for (final item in widget.state.entries) item.id};
       await widget.state.deleteEntry(entry.id);
-      await widget.state.applyLog(LoggedDay(foods: log.foods), entry.date);
-      final total = log.foods.fold<int>(0, (sum, food) => sum + food.calories);
-      navigator.pop();
+      await widget.state.applyLog(LoggedDay(foods: foods), entry.date);
+      final added = widget.state.entries
+          .where((item) => !oldIds.contains(item.id))
+          .toList();
+      if (template != null && updateTemplate && added.isNotEmpty) {
+        final updated = SavedMeal(
+          name: template.name,
+          calories: added.first.nutrition.calories,
+          proteinGrams: added.first.nutrition.protein,
+          ingredients: [
+            if (template.ingredients.isNotEmpty) template.ingredients,
+            template.portions > 1 ? 'Each portion: $note' : note,
+          ].join('\n'),
+          portions: template.portions,
+        );
+        await client.save(updated);
+        this.template = updated;
+      }
+      final after = added.fold<int>(
+        0,
+        (sum, item) => sum + item.nutrition.calories,
+      );
+      setState(() {
+        if (added.isNotEmpty) {
+          entry = added.first;
+          name.text = entry.name;
+        }
+        change.clear();
+      });
       sonner.show(
         ShadToast(
-          title: const Text('Fixed'),
+          title: Text(
+            template != null && updateTemplate
+                ? 'Updated today and your saved ${template.name}'
+                : 'Updated',
+          ),
           description: Text(
-            '${entry.nutrition.calories} kcal is now ${_thousands(total)} kcal.',
+            '${_thousands(before)} kcal is now ${_thousands(after)} kcal.',
           ),
         ),
       );
     } catch (error) {
-      setState(() => fixError = error.toString());
+      setState(() => errorMessage = error.toString());
     } finally {
       if (mounted) {
-        setState(() => fixing = false);
+        setState(() => working = false);
       }
     }
   }
 
-  Future<void> _saveMeal() async {
+  Future<void> _saveAsMeal() async {
     final meal = SavedMeal(
       name: name.text.trim(),
-      calories: _readInt(calories.text),
-      proteinGrams: _readDouble(protein.text),
+      calories: entry.nutrition.calories,
+      proteinGrams: entry.nutrition.protein,
     );
     if (meal.name.isEmpty) {
       return;
     }
     setState(() => saving = true);
-    final navigator = Navigator.of(context);
-    final messenger = ShadSonner.of(context);
+    final sonner = ShadSonner.of(context);
     try {
-      await MealsApiClient(
-        widget.auth.authBackendUrl,
-        widget.auth.session?.backendToken ?? '',
-      ).save(meal);
-      navigator.pop();
-      messenger.show(
+      await client.save(meal);
+      setState(() => template = meal);
+      sonner.show(
         ShadToast(
           title: Text('Saved ${meal.name}'),
-          description: Text(
-            'It counts as ${_thousands(meal.calories)} kcal whenever you '
-            'mention it.',
-          ),
+          description: const Text('Add it again any time from Recents.'),
         ),
       );
     } catch (error) {
-      setState(() => saving = false);
-      messenger.show(ShadToast.destructive(description: Text('$error')));
+      sonner.show(ShadToast.destructive(description: Text('$error')));
+    } finally {
+      if (mounted) {
+        setState(() => saving = false);
+      }
     }
   }
 
-  Future<void> _delete() async {
-    await widget.state.deleteEntry(widget.entry.id);
+  Future<void> _remove() async {
+    await widget.state.deleteEntry(entry.id);
     if (mounted) {
       Navigator.of(context).pop();
     }
@@ -973,29 +1268,43 @@ class _FoodSheetState extends State<FoodSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = ShadTheme.of(context);
-    final entry = widget.entry;
-    return ShadSheet(
-      title: Text(entry.name),
-      description: entry.notes.isEmpty ? null : Text(entry.notes),
-      actions: [
-        ShadButton(
-          key: const ValueKey('foodSaveMeal'),
-          onPressed: saving ? null : _saveMeal,
-          leading: const Icon(LucideIcons.bookmarkPlus, size: 16),
-          child: const Text('Save as my meal'),
-        ),
-        ShadButton.ghost(
-          onPressed: _delete,
-          foregroundColor: theme.colorScheme.destructive,
-          leading: const Icon(LucideIcons.trash2, size: 16),
-          child: const Text('Remove from today'),
-        ),
-      ],
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    final template = this.template;
+    final hint = theme.textTheme.muted.copyWith(fontSize: 12);
+    final ingredients =
+        template?.ingredients
+            .split(RegExp(r'[\n,]+'))
+            .map((line) => line.trim())
+            .where((line) => line.isNotEmpty)
+            .toList() ??
+        const <String>[];
+    return Scaffold(
+      backgroundColor: theme.colorScheme.background,
+      body: SafeArea(
+        child: ListView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 32),
           children: [
+            Row(
+              children: [
+                ShadIconButton.ghost(
+                  icon: const Icon(LucideIcons.chevronLeft),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+                Expanded(
+                  child: Text(
+                    template == null ? entry.name : 'Today\'s ${template.name}',
+                    style: theme.textTheme.large,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+            if (entry.notes.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 8),
+                child: Text(entry.notes, style: theme.textTheme.muted),
+              ),
+            const SizedBox(height: 8),
             Row(
               children: [
                 StatTile(
@@ -1012,82 +1321,111 @@ class _FoodSheetState extends State<FoodSheet> {
                 ),
               ],
             ),
-            const SizedBox(height: 20),
-            Text(
-              'Not right? Say what it actually was',
-              style: theme.textTheme.p.copyWith(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 8),
-            ShadInput(
-              key: const ValueKey('foodCorrection'),
-              controller: correction,
-              placeholder: const Text(
-                'It was Greek yogurt with sriracha, not mayo',
+            if (template != null && ingredients.isNotEmpty) ...[
+              const SectionLabel('In your saved meal'),
+              ShadCard(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final line in ingredients)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Text(line, style: theme.textTheme.small),
+                      ),
+                    if (template.portions > 1)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(
+                          'Makes ${template.portions} portions. This is one.',
+                          style: hint,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-              onSubmitted: (_) => _fix(),
-              trailing: fixing
-                  ? const SizedBox.square(
-                      dimension: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : GestureDetector(
-                      key: const ValueKey('foodFix'),
-                      onTap: _fix,
-                      child: Icon(
-                        LucideIcons.refreshCw,
-                        size: 18,
-                        color: theme.colorScheme.primary,
+            ],
+            SectionLabel(
+              template != null
+                  ? 'Change today\'s'
+                  : 'Not right? Say what it was',
+            ),
+            ShadInput(
+              key: const ValueKey('foodChange'),
+              controller: change,
+              placeholder: Text(
+                template != null
+                    ? 'Add 15g honey, swap whey for Greek yogurt'
+                    : 'It was Greek yogurt with sriracha, not mayo',
+              ),
+              onSubmitted: (_) => _apply(),
+            ),
+            if (template != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Row(
+                  children: [
+                    ShadSwitch(
+                      key: const ValueKey('updateTemplate'),
+                      value: updateTemplate,
+                      onChanged: (value) =>
+                          setState(() => updateTemplate = value),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Also update my saved ${template.name}',
+                        style: theme.textTheme.small,
                       ),
                     ),
-            ),
-            if (fixError.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text(
-                  fixError,
-                  style: theme.textTheme.small.copyWith(
-                    color: theme.colorScheme.destructive,
-                  ),
+                  ],
                 ),
               ),
-            const SizedBox(height: 20),
-            Text(
-              'Save it as one of your meals',
-              style: theme.textTheme.p.copyWith(fontWeight: FontWeight.w600),
-            ),
-            Text(
-              'Name it the way you type it and fix the numbers. Sculptus '
-              'will use them exactly from now on.',
-              style: theme.textTheme.muted.copyWith(fontSize: 13),
-            ),
+            if (errorMessage.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              ShadAlert.destructive(
+                icon: const Icon(LucideIcons.info),
+                description: Text(errorMessage),
+              ),
+            ],
             const SizedBox(height: 12),
-            ShadInput(
-              key: const ValueKey('mealName'),
-              controller: name,
-              placeholder: const Text('Mexican bowl'),
-              leading: const Icon(LucideIcons.utensils, size: 16),
+            ShadButton(
+              key: const ValueKey('foodApply'),
+              height: 46,
+              onPressed: working ? null : _apply,
+              leading: working
+                  ? const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(LucideIcons.refreshCw, size: 16),
+              child: Text(working ? 'Working it out' : 'Update'),
             ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                Expanded(
-                  child: ShadInput(
-                    key: const ValueKey('mealCalories'),
-                    controller: calories,
-                    keyboardType: TextInputType.number,
-                    trailing: const Text('kcal'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ShadInput(
-                    key: const ValueKey('mealProtein'),
-                    controller: protein,
-                    keyboardType: TextInputType.number,
-                    trailing: const Text('g protein'),
-                  ),
-                ),
-              ],
+            if (template == null) ...[
+              const SectionLabel('Keep it as one of your meals'),
+              ShadInput(
+                key: const ValueKey('mealName'),
+                controller: name,
+                placeholder: const Text('Name it the way you type it'),
+                leading: const Icon(LucideIcons.utensils, size: 16),
+              ),
+              const SizedBox(height: 8),
+              ShadButton.outline(
+                key: const ValueKey('foodSaveMeal'),
+                onPressed: saving ? null : _saveAsMeal,
+                leading: const Icon(LucideIcons.bookmarkPlus, size: 16),
+                child: const Text('Save as my meal'),
+              ),
+            ],
+            const SizedBox(height: 24),
+            ShadButton.ghost(
+              onPressed: _remove,
+              foregroundColor: theme.colorScheme.destructive,
+              leading: const Icon(LucideIcons.trash2, size: 16),
+              child: const Text('Remove from this day'),
             ),
           ],
         ),

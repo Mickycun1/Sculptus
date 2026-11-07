@@ -1,9 +1,16 @@
 part of '../main.dart';
 
 class AuthScreen extends StatefulWidget {
-  const AuthScreen({super.key, required this.auth});
+  const AuthScreen({
+    super.key,
+    required this.auth,
+    this.startCreating = false,
+    this.onBack,
+  });
 
   final AuthController auth;
+  final bool startCreating;
+  final VoidCallback? onBack;
 
   @override
   State<AuthScreen> createState() => _AuthScreenState();
@@ -13,7 +20,7 @@ class _AuthScreenState extends State<AuthScreen> {
   final name = TextEditingController();
   final email = TextEditingController();
   final password = TextEditingController();
-  bool creating = false;
+  late bool creating = widget.startCreating;
   bool obscure = true;
 
   @override
@@ -60,6 +67,15 @@ class _AuthScreenState extends State<AuthScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    if (widget.onBack != null)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: ShadIconButton.ghost(
+                          key: const ValueKey('authBack'),
+                          icon: const Icon(LucideIcons.chevronLeft),
+                          onPressed: widget.onBack,
+                        ),
+                      ),
                     Center(
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(22),
@@ -80,7 +96,7 @@ class _AuthScreenState extends State<AuthScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      'Log your whole day in one message.',
+                      creating ? 'Create your account' : 'Welcome back',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.muted,
                     ),
@@ -188,9 +204,7 @@ class _AuthScreenState extends State<AuthScreen> {
                       child: ShadButton.link(
                         onPressed: _toggleMode,
                         child: Text(
-                          creating
-                              ? 'Have an account? Sign in'
-                              : 'New here? Create an account',
+                          creating ? 'Sign in instead' : 'Create an account',
                         ),
                       ),
                     ),

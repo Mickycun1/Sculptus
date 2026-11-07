@@ -394,7 +394,7 @@ class BodyCard extends StatelessWidget {
           row(LucideIcons.ruler, 'Height', height()),
           row(
             LucideIcons.user,
-            'Sex',
+            'M/F',
             goals.sex == 'female' ? 'Female' : 'Male',
           ),
           row(
@@ -500,12 +500,12 @@ Future<void> showBodySheet(BuildContext context, SculptusState state) async {
                       child: option == sex
                           ? ShadButton(
                               onPressed: () {},
-                              child: Text(option == 'male' ? 'Male' : 'Female'),
+                              child: Text(option == 'male' ? 'M' : 'F'),
                             )
                           : ShadButton.outline(
                               onPressed: () =>
                                   setSheetState(() => sex = option),
-                              child: Text(option == 'male' ? 'Male' : 'Female'),
+                              child: Text(option == 'male' ? 'M' : 'F'),
                             ),
                     ),
                     if (option == 'male') const SizedBox(width: 8),

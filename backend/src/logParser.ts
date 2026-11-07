@@ -89,10 +89,40 @@ Photos: the person may attach photos, such as a photo of their plate or meal, a 
 
 Ignore commentary, feelings, and anything that is not food, activity, or weight.`;
 
+export type CallUsage = {
+  route: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+};
+
+type UsageLike = {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+};
+
+function toUsage(route: string, model: string, usage: UsageLike): CallUsage {
+  return {
+    route,
+    model,
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: usage.cache_creation_input_tokens ?? 0
+  };
+}
+
 export class LogParser {
   private readonly client: Anthropic;
 
-  constructor(apiKey: string) {
+  constructor(
+    apiKey: string,
+    private readonly onUsage: (usage: CallUsage, userId: string) => void = () => {}
+  ) {
     this.client = new Anthropic({ apiKey });
   }
 
@@ -100,7 +130,8 @@ export class LogParser {
     text: string,
     savedMeals: SavedMeal[] = [],
     bodyWeightLb: number | null = null,
-    images: LogImage[] = []
+    images: LogImage[] = [],
+    userId = ""
   ): Promise<DayLog> {
     const context = [
       bodyWeightLb ? `Body weight: ${bodyWeightLb} lb` : "",
@@ -132,6 +163,7 @@ export class LogParser {
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content }]
     });
+    this.onUsage(toUsage(images.length ? "log-photo" : "log", response.model, response.usage), userId);
 
     if (response.stop_reason === "refusal") {
       throw new Error("Could not read that log. Try rephrasing it.");
@@ -145,7 +177,8 @@ export class LogParser {
   async estimateMeal(
     name: string,
     ingredients: string,
-    portions = 1
+    portions = 1,
+    userId = ""
   ): Promise<MealEstimate> {
     const response = await this.client.beta.messages.parse({
       model: "claude-opus-5-5",
@@ -164,6 +197,7 @@ export class LogParser {
         }
       ]
     });
+    this.onUsage(toUsage("meal-estimate", response.model, response.usage), userId);
     if (!response.parsed_output) {
       throw new Error("Could not work out that meal. Try listing amounts.");
     }
